@@ -38,7 +38,8 @@ DEFAULTS = {
     # These are computed automatically if not specified
     "white_level": None,
     "black_level": None,
-    "bit_depth": 16,
+    "bit_depth": 32,
+    "output_format": "auto",  # "auto", "uint16", "uint32", or "float32"
 
     # Noise model
     "read_noise": 1.5,
@@ -231,7 +232,8 @@ def quantize_to_sensor(mosaic,
                        white_level=DEFAULTS["white_level"],
                        black_level=DEFAULTS["black_level"],
                        read_noise=DEFAULTS["read_noise"],
-                       shot_noise=DEFAULTS["shot_noise"]):
+                       shot_noise=DEFAULTS["shot_noise"],
+                       output_format=DEFAULTS["output_format"]):
     """
     Linear sensor model with fixed middle gray DN.
     
@@ -245,6 +247,7 @@ def quantize_to_sensor(mosaic,
     - middle_gray_dn: Fixed DN for 0.18 scene-linear (default: 18% of 14-bit range)
     - min_stop/max_stop: Stops relative to 0.18 where sensor clips/floors
     - white_level/black_level: If provided, override auto-computed clip/floor
+    - output_format: "uint16", "uint32", or "float32"
     """
     # Default middle_gray_dn: 18% of 14-bit usable range (16383 - 256 = 16127)
     if middle_gray_dn is None:
@@ -294,10 +297,15 @@ def quantize_to_sensor(mosaic,
     # Clip to DNG range
     dn = np.clip(dn, dng_black, dng_white)
     
-    # Use uint32 if WhiteLevel exceeds 16-bit range
-    if dng_white > 65535:
+    # Convert to output format
+    if output_format == "float32":
+        # For float32 DNG, return as float32 (DN values as floats)
+        # BlackLevel/WhiteLevel will also be float
+        return dn.astype(np.float32), float(dng_black), float(dng_white)
+    elif output_format == "uint32":
         return np.rint(dn).astype(np.uint32), int(np.floor(dng_black)), int(np.ceil(dng_white))
-    return np.rint(dn).astype(np.uint16), int(np.floor(dng_black)), int(np.ceil(dng_white))
+    else:  # uint16
+        return np.rint(dn).astype(np.uint16), int(np.floor(dng_black)), int(np.ceil(dng_white))
 
 
 # ------------------------------------------------------------------
@@ -307,6 +315,7 @@ def write_dng(mosaic, path,
               black_level=DEFAULTS["black_level"],
               white_level=DEFAULTS["white_level"],
               bit_depth=DEFAULTS["bit_depth"],
+              output_format=DEFAULTS["output_format"],
               pattern=DEFAULTS["pattern"],
                r_filter=None,
                g_filter=None,
@@ -332,8 +341,7 @@ def write_dng(mosaic, path,
     # Rec.2020: R=(0.708,0.292), G=(0.170,0.797), B=(0.131,0.046), D65=(0.3127,0.3290)
     cm1 = compute_cm1(r_filter, g_filter, b_filter)
 
-
-# CameraCalibration1: identity
+    # CameraCalibration1: identity
     cc1 = (
         1, 1, 0, 1, 0, 1,
         0, 1, 1, 1, 0, 1,
@@ -351,14 +359,39 @@ def write_dng(mosaic, path,
     ab = (1, 1, 1, 1, 1, 1)
     ds = (1, 1, 1, 1)
 
-    # Determine bit depth from parameter (always use user-specified bit_depth)
-    bits_per_sample = bit_depth
-
-    # Convert data to match bit depth if needed
-    if bit_depth == 32 and mosaic.dtype != np.uint32:
-        mosaic = mosaic.astype(np.uint32)
-    elif bit_depth <= 16 and mosaic.dtype != np.uint16:
-        mosaic = mosaic.astype(np.uint16)
+    # Determine bit depth and sample format from output_format
+    if output_format == "float32":
+        bits_per_sample = 32
+        # Ensure mosaic is float32 (tifffile will auto-set SampleFormat=3)
+        if mosaic.dtype != np.float32:
+            mosaic = mosaic.astype(np.float32)
+        # For float32 DNG, WhiteLevel/BlackLevel are written as LONG (integers) per DNG spec / darktable
+        bl_tag_type = 4  # SLONG
+        bl_count = 1
+        bl_val = int(black_level)
+        wl_tag_type = 4  # SLONG (LONG in libtiff)
+        wl_count = 1
+        wl_val = int(round(white_level))
+    elif output_format == "uint32":
+        bits_per_sample = 32
+        if mosaic.dtype != np.uint32:
+            mosaic = mosaic.astype(np.uint32)
+        bl_tag_type = 4  # SLONG
+        bl_count = 1
+        bl_val = int(black_level)
+        wl_tag_type = 4  # SLONG
+        wl_count = 1
+        wl_val = int(white_level)
+    else:  # uint16
+        bits_per_sample = 16
+        if mosaic.dtype != np.uint16:
+            mosaic = mosaic.astype(np.uint16)
+        bl_tag_type = 3  # SHORT
+        bl_count = 1
+        bl_val = int(black_level)
+        wl_tag_type = 3  # SHORT
+        wl_count = 1
+        wl_val = int(white_level)
 
     extratags = [
         (262, 3, 1, 32803, False),        # PhotometricInterpretation = CFA
@@ -367,8 +400,8 @@ def write_dng(mosaic, path,
         (50706, 1, 4, (1, 4, 0, 0), False),          # DNGVersion
         (50707, 1, 4, (1, 1, 0, 0), False),          # DNGBackwardVersion
         (50708, 2, 1, b"Synthetic", False),         # UniqueCameraModel
-        (50714, 4, 1, int(black_level), False),       # BlackLevel
-        (50717, 4, 1, int(white_level), False),       # WhiteLevel
+        (50714, bl_tag_type, bl_count, bl_val, False),       # BlackLevel
+        (50717, wl_tag_type, wl_count, wl_val, False),       # WhiteLevel
         (50718, 5, 2, ds, False),                     # DefaultScale
         (50721, 10, 9, cm1, False),                   # ColorMatrix1
         (50723, 10, 9, cc1, False),                   # CameraCalibration1
@@ -386,7 +419,7 @@ def write_dng(mosaic, path,
         bitspersample=bits_per_sample,
         extratags=extratags,
     )
-    print(f"Wrote DNG: {path}  ({w}x{h}, {pattern}, {bit_depth}-bit)")
+    print(f"Wrote DNG: {path}  ({w}x{h}, {pattern}, {output_format})")
     print(f"  BlackLevel={black_level}, WhiteLevel={white_level}")
     print(f"  AsShotNeutral=[{asn_r/10000:.4f}, 1.0, {asn_b/10000:.4f}]")
 
@@ -433,6 +466,7 @@ def main():
             'white_level': DEFAULTS["white_level"],
             'black_level': DEFAULTS["black_level"],
             'bit_depth': DEFAULTS["bit_depth"],
+            'output_format': DEFAULTS["output_format"],
             'read_noise': DEFAULTS["read_noise"],
             'no_shot_noise': DEFAULTS["no_shot_noise"],
         })()
@@ -462,7 +496,7 @@ def main():
         parser.add_argument("--sensor-black-level", type=int, default=DEFAULTS["sensor_black_level"],
                             help="DN for zero scene-linear signal (sensor black level). Default: 256")
         parser.add_argument("--middle-gray-dn", type=int, default=DEFAULTS["middle_gray_dn"],
-                            help="Fixed DN for 0.18 middle gray. Default: auto (18% of 14-bit range above sensor_black_level)")
+                            help="Fixed DN for 0.18 middle gray. Default: auto (18%% of 14-bit range above sensor_black_level)")
         
         parser.add_argument("--white-level", type=int, default=DEFAULTS["white_level"],
                             help="DNG WhiteLevel. Default: auto (sensor clip point at max_stop)")
@@ -470,6 +504,11 @@ def main():
                             help="DNG BlackLevel. Default: auto (sensor floor point at min_stop)")
         parser.add_argument("--bit-depth", type=int, default=DEFAULTS["bit_depth"],
                             choices=[8, 10, 12, 14, 16, 32])
+        parser.add_argument("--output-format", default=DEFAULTS["output_format"],
+                            choices=["auto", "uint16", "uint32", "float32"],
+                            help="Output data format: auto (default, selects float32 for 32-bit, uint16 otherwise), "
+                                 "uint16, uint32, or float32. "
+                                 "float32 writes 32-bit IEEE float DNG compatible with darktable HDR.")
         parser.add_argument("--read-noise", type=float, default=DEFAULTS["read_noise"],
                             help="Read noise std-dev in DN (0 to disable)")
         parser.add_argument("--no-shot-noise", action="store_true", default=DEFAULTS["no_shot_noise"])
@@ -513,6 +552,13 @@ def main():
 
     mosaic = build_bayer(r, g1, g2, b, args.pattern)
 
+    # Auto-select output format based on bit depth
+    if args.output_format == "auto":
+        if args.bit_depth >= 32:
+            args.output_format = "float32"
+        else:
+            args.output_format = "uint16"
+
     # ------------------------------------------------------------------
     # Sensor model
     # ------------------------------------------------------------------
@@ -527,6 +573,7 @@ def main():
         white_level=args.white_level,
         read_noise=args.read_noise,
         shot_noise=not args.no_shot_noise,
+        output_format=args.output_format,
     )
 
     # ------------------------------------------------------------------
@@ -538,6 +585,7 @@ def main():
         black_level=black_level,
         white_level=white_level,
         bit_depth=args.bit_depth,
+        output_format=args.output_format,
         pattern=args.pattern,
         r_filter=r_filter,
         g_filter=g_filter,

@@ -1,0 +1,13 @@
+# IDE
+.idea/
+
+# Local configuration (SDK paths, etc.)
+local.properties
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project-specific
+*.exr
+*.dng

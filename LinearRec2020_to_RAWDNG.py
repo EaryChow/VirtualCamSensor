@@ -10,11 +10,82 @@ import glob
 import os
 import sys
 import numpy as np
+from fractions import Fraction
 
 
-# ------------------------------------------------------------------
-# 1. EXR Reading
-# ------------------------------------------------------------------
+def compute_cm1(r_filter, g_filter, b_filter):
+    """
+    Compute ColorMatrix1 (XYZ to Camera Native) using the algorithmic algorithm.
+
+    Algorithm:
+    1. Rec.2020 primary chromaticities (x, y) with Y=1:
+       R = (0.708, 0.292), G = (0.170, 0.797), B = (0.131, 0.046)
+    2. D65 white point: (0.3127, 0.3290)
+    3. Solve for scaling factors s = [sr, sg, sb] such that
+       [sr*Xr, sg*Xg, sb*Xb] * [1, 1, 1]^T = [Xw, Yw, Zw]
+    4. M_XYZ_from_R2020 = [sr*Xr, sg*Xg, sb*Xb;
+                           sr*Yr, sg*Yg, sb*Yb;
+                           sr*Zr, sg*Zg, sb*Zb]  (3x3)
+    5. Filter matrix F (3x3): rows = r_filter, g_filter, b_filter in Rec.2020 RGB
+    6. M_cam_from_XYZ = F @ inv(M_XYZ_from_R2020)  (3x3)
+    7. CM1 = M_cam_from_XYZ in DNG rational format (row-major, 18 rationals)
+    """
+    # Rec.2020 primary chromaticities (x, y) with Y=1
+    r_xy = np.array([0.708, 0.292])
+    g_xy = np.array([0.170, 0.797])
+    b_xy = np.array([0.131, 0.046])
+
+    # D65 white point
+    white_xy = np.array([0.3127, 0.3290])
+
+    # Convert (x, y) to XYZ with Y=1
+    def xy_to_XYZ(xy):
+        x, y = xy
+        X = x / y
+        Y = 1.0
+        Z = (1 - x - y) / y
+        return np.array([X, Y, Z])
+
+    Xr, Yr, Zr = xy_to_XYZ(r_xy)
+    Xg, Yg, Zg = xy_to_XYZ(g_xy)
+    Xb, Yb, Zb = xy_to_XYZ(b_xy)
+    Xw, Yw, Zw = xy_to_XYZ(white_xy)
+
+    # Solve for scaling factors: M @ s = w
+    M = np.array([
+        [Xr, Xg, Xb],
+        [Yr, Yg, Yb],
+        [Zr, Zg, Zb]
+    ])
+    w = np.array([Xw, Yw, Zw])
+    s = np.linalg.solve(M, w)
+    sr, sg, sb = s
+
+    # M_XYZ_from_R2020 (columns are scaled primaries)
+    M_XYZ_from_R2020 = np.array([
+        [sr * Xr, sg * Xg, sb * Xb],
+        [sr * Yr, sg * Yg, sb * Yb],
+        [sr * Zr, sg * Zg, sb * Zb]
+    ])
+
+    # Filter matrix F (rows = r, g, b filters in Rec.2020 RGB)
+    F = np.array([r_filter, g_filter, b_filter])
+
+    # M_cam_from_XYZ = F @ inv(M_XYZ_from_R2020)
+    M_cam_from_XYZ = F @ np.linalg.inv(M_XYZ_from_R2020)
+
+    # Convert to DNG rational format (18 rationals, row-major)
+    # Each rational is (numerator, denominator)
+    rationals = []
+    for row in M_cam_from_XYZ:
+        for val in row:
+            frac = Fraction(val).limit_denominator(10000)
+            rationals.append(frac.numerator)
+            rationals.append(frac.denominator)
+
+    return tuple(rationals)
+
+
 def read_exr(path, expect_rgb=True):
     try:
         import OpenEXR
@@ -174,10 +245,10 @@ def write_dng(mosaic, path,
               black_level=256,
               white_level=16383,
               bit_depth=14,
-              pattern='RGGB',
-              r_filter=None,
-              g_filter=None,
-              b_filter=None):
+pattern='RGGB',
+               r_filter=None,
+               g_filter=None,
+               b_filter=None):
     import tifffile
 
     h, w = mosaic.shape
@@ -189,32 +260,23 @@ def write_dng(mosaic, path,
     }
     cfa = cfa_map.get(pattern, [0, 1, 1, 2])
 
-    # ColorMatrix1: XYZ to Camera Native
-    # | Primary   | x      | y           | Y           |
-    # | --------- | ------ | ----------- | ----------- |
-    # | **Red**   | 1.0670 | 0.0372      | 0.0335      |
-    # | **Green** | 0.0988 | 0.8739      | 0.7349      |
-    # | **Blue**  | 0.1215 | -0.0049     | -0.0066      |
-    # White point: x = 0.3915, y = 0.2472, Y = 0.7617
-    cm1 = (
-    4553, 4415, -155, 1382, -239, 1678,
-    -422, 9129, 2219, 1625, 51, 3646,
-    291, 3524, -351, 9931, 1441, 1730
-)
-
-
-    # CameraCalibration1: identity
-    cc1 = (
-        1, 1, 0, 1, 0, 1,
-        0, 1, 1, 1, 0, 1,
-        0, 1, 0, 1, 1, 1
-    )
-
     if r_filter is None:
         # Rec.709 primaries in Rec.2020
         r_filter = np.array([0.627404, 0.069097, 0.016391])
         g_filter = np.array([0.329283, 0.919540, 0.088013])
         b_filter = np.array([0.043313, 0.011362, 0.895595])
+
+    # ColorMatrix1: XYZ to Camera Native (computed from Rec.2020 primaries + filter matrix)
+    # Rec.2020: R=(0.708,0.292), G=(0.170,0.797), B=(0.131,0.046), D65=(0.3127,0.3290)
+    cm1 = compute_cm1(r_filter, g_filter, b_filter)
+
+
+# CameraCalibration1: identity
+    cc1 = (
+        1, 1, 0, 1, 0, 1,
+        0, 1, 1, 1, 0, 1,
+        0, 1, 0, 1, 1, 1
+    )
 
     r_sum = float(np.sum(r_filter))
     g_sum = float(np.sum(g_filter))

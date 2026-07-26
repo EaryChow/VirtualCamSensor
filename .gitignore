@@ -1,5 +1,6 @@
 # IDE
 .idea/
+__pycache__/
 
 # Local configuration (SDK paths, etc.)
 local.properties

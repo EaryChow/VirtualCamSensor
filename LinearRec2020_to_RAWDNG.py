@@ -13,6 +13,32 @@ import numpy as np
 from fractions import Fraction
 
 
+# Single source of truth for all default parameters
+DEFAULTS = {
+    # Input filters: Rec.709 primaries expressed in Rec.2020 RGB space
+    "r_filter": [0.627404, 0.069097, 0.016391],
+    "g_filter": [0.329283, 0.919540, 0.088013],
+    "b_filter": [0.043313, 0.011362, 0.895595],
+
+    # Bayer pattern
+    "pattern": "RGGB",
+
+    # Sensor model (stops relative to 0.18 middle gray)
+    "min_stop": -10.0,
+    "max_stop": 4.0,
+
+    # DNG output levels
+    "white_level": 16383,
+    "black_level": 256,
+    "bit_depth": 14,
+
+    # Noise model
+    "read_noise": 1.5,
+    "shot_noise": True,
+    "no_shot_noise": False,
+}
+
+
 def compute_cm1(r_filter, g_filter, b_filter):
     """
     Compute ColorMatrix1 (XYZ to Camera Native) using the algorithmic algorithm.
@@ -190,12 +216,12 @@ def build_bayer(r_plane, g1_plane, g2_plane, b_plane, pattern='RGGB'):
 # 4. Sensor model
 # ------------------------------------------------------------------
 def quantize_to_sensor(mosaic,
-                       min_stop=-10.0,
-                       max_stop=4.0,
-                       black_level=256,
-                       white_level=16383,
-                       read_noise=1.5,
-                       shot_noise=True):
+                       min_stop=DEFAULTS["min_stop"],
+                       max_stop=DEFAULTS["max_stop"],
+                       black_level=DEFAULTS["black_level"],
+                       white_level=DEFAULTS["white_level"],
+                       read_noise=DEFAULTS["read_noise"],
+                       shot_noise=DEFAULTS["shot_noise"]):
     """
     Linear sensor model. Gain is set by max_stop only.
     
@@ -242,10 +268,10 @@ def quantize_to_sensor(mosaic,
 # 5. Write DNG
 # ------------------------------------------------------------------
 def write_dng(mosaic, path,
-              black_level=256,
-              white_level=16383,
-              bit_depth=14,
-pattern='RGGB',
+              black_level=DEFAULTS["black_level"],
+              white_level=DEFAULTS["white_level"],
+              bit_depth=DEFAULTS["bit_depth"],
+              pattern=DEFAULTS["pattern"],
                r_filter=None,
                g_filter=None,
                b_filter=None):
@@ -352,17 +378,17 @@ def main():
             'input': input_exr,
             'output_dng': output_dng,
             'planes': None,
-            'r_filter': "0.627404,0.069097,0.016391",
-            'g_filter': "0.329283,0.919540,0.088013",
-            'b_filter': "0.043313,0.011362,0.895595",
-            'pattern': 'RGGB',
-            'min_stop': -10.0,
-            'max_stop': 4.0,
-            'white_level': 16383,
-            'black_level': 256,
-            'bit_depth': 14,
-            'read_noise': 1.5,
-            'no_shot_noise': False,
+            'r_filter': ','.join(map(str, DEFAULTS["r_filter"])),
+            'g_filter': ','.join(map(str, DEFAULTS["g_filter"])),
+            'b_filter': ','.join(map(str, DEFAULTS["b_filter"])),
+            'pattern': DEFAULTS["pattern"],
+            'min_stop': DEFAULTS["min_stop"],
+            'max_stop': DEFAULTS["max_stop"],
+            'white_level': DEFAULTS["white_level"],
+            'black_level': DEFAULTS["black_level"],
+            'bit_depth': DEFAULTS["bit_depth"],
+            'read_noise': DEFAULTS["read_noise"],
+            'no_shot_noise': DEFAULTS["no_shot_noise"],
         })()
     else:
         parser = argparse.ArgumentParser(
@@ -373,27 +399,27 @@ def main():
                             help="Output DNG path (default: same name as input with .dng)")
         parser.add_argument("--planes", nargs=4, metavar=("R","G1","G2","B"),
                             help="Use 4 pre-rendered scalar EXRs instead of RGB filtering")
-        parser.add_argument("--r-filter", default="0.627404,0.069097,0.016391")
-        parser.add_argument("--g-filter", default="0.329283,0.919540,0.088013")
-        parser.add_argument("--b-filter", default="0.043313,0.011362,0.895595")
-        parser.add_argument("--pattern", default="RGGB",
+        parser.add_argument("--r-filter", default=','.join(map(str, DEFAULTS["r_filter"])))
+        parser.add_argument("--g-filter", default=','.join(map(str, DEFAULTS["g_filter"])))
+        parser.add_argument("--b-filter", default=','.join(map(str, DEFAULTS["b_filter"])))
+        parser.add_argument("--pattern", default=DEFAULTS["pattern"],
                             choices=["RGGB", "BGGR", "GRBG", "GBRG"])
         
         # Central setting: min and max stops relative to 0.18
         # max_stop sets the gain. min_stop is informational (noise floor).
-        parser.add_argument("--min-stop", type=float, default=-10.0,
+        parser.add_argument("--min-stop", type=float, default=DEFAULTS["min_stop"],
                             help="Stops below 0.18 where signal hits noise floor. Default: -10.0")
-        parser.add_argument("--max-stop", type=float, default=4.0,
+        parser.add_argument("--max-stop", type=float, default=DEFAULTS["max_stop"],
                             help="Stops above 0.18 where sensor saturates. Sets the gain. "
-                                 "Default: 4.0  (0.18 -> ~1264 DN, clip at 2.88)")
+                                 "Default: 4.0 (0.18 -> ~1264 DN, clip at 2.88)")
         
-        parser.add_argument("--white-level", type=int, default=16383)
-        parser.add_argument("--black-level", type=int, default=256)
-        parser.add_argument("--bit-depth", type=int, default=14,
+        parser.add_argument("--white-level", type=int, default=DEFAULTS["white_level"])
+        parser.add_argument("--black-level", type=int, default=DEFAULTS["black_level"])
+        parser.add_argument("--bit-depth", type=int, default=DEFAULTS["bit_depth"],
                             choices=[8, 10, 12, 14, 16])
-        parser.add_argument("--read-noise", type=float, default=1.5,
+        parser.add_argument("--read-noise", type=float, default=DEFAULTS["read_noise"],
                             help="Read noise std-dev in DN (0 to disable)")
-        parser.add_argument("--no-shot-noise", action="store_true")
+        parser.add_argument("--no-shot-noise", action="store_true", default=DEFAULTS["no_shot_noise"])
         args = parser.parse_args()
 
         if args.output_dng is None:
@@ -403,7 +429,7 @@ def main():
     r_filter = parse_filter(args.r_filter)
     g_filter = parse_filter(args.g_filter)
     b_filter = parse_filter(args.b_filter)
-    print(f"Filters (Rec.2020 RGB):")
+    print(f"Filters (Rec.709 in Rec.2020 RGB):")
     print(f"  R: {r_filter}")
     print(f"  G: {g_filter}")
     print(f"  B: {b_filter}")

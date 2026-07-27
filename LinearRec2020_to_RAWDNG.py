@@ -31,14 +31,15 @@ DEFAULTS = {
     # float32 uses fixed middle gray at 18%. True/False override per-bit-depth default.
     "fixed_middle_gray": None,
 
+    # Camera ISO. Higher ISO = more gain = more noise.
+    # Gain = base_gain * (iso / native_iso)
+    "native_iso": 100,
+    "iso": 100,
+
     "sensor_sensitivity_weighting": [1.0, 1.0, 1.0],
 
     # Sensor black level (DN for zero open-domain linear signal)
     "sensor_black_level": 256,
-
-    # Middle gray DN
-    # Default: auto-compute based on fixed_middle_gray and bit_depth
-    "middle_gray_dn": None,  # None = auto-compute as sensor_black_level + 0.18 * (16383 - 256)
 
     # DNG output levels (will be set to fit full sensor DR [min_stop, max_stop])
     # These are computed automatically if not specified
@@ -237,8 +238,9 @@ def quantize_to_sensor(mosaic,
                        min_stop=DEFAULTS["min_stop"],
                        max_stop=DEFAULTS["max_stop"],
                        fixed_middle_gray=DEFAULTS["fixed_middle_gray"],
+                       native_iso=DEFAULTS["native_iso"],
+                       iso=DEFAULTS["iso"],
                        sensor_black_level=DEFAULTS["sensor_black_level"],
-                       middle_gray_dn=DEFAULTS["middle_gray_dn"],
                        white_level=DEFAULTS["white_level"],
                        black_level=DEFAULTS["black_level"],
                        read_noise=DEFAULTS["read_noise"],
@@ -248,48 +250,38 @@ def quantize_to_sensor(mosaic,
     """
     Linear sensor model.
 
-    When fixed_middle_gray=True, middle gray (0.18 open-domain linear) maps to a
-    fixed DN (18% of file range). Upper bound grows with max_stop.
-    When fixed_middle_gray=False, upper bound is pinned at file_max and middle gray
-    shifts darker, allowing higher-range content to fit in integer bit depths.
-    When fixed_middle_gray=None (default), integer bit depths behave as False and
-    float32 behaves as True.
+    Sensor gain is derived from ISO (physical parameter), independent of bit depth.
+    ISO 100 = base gain. At ISO 100 with 32-bit float output and fixed_middle_gray,
+    behavior is identical to the original model.
 
-    Gain is set so: 0.18 * gain = middle_gray_dn - sensor_black_level
-    Sensor DR [min_stop, max_stop] maps to [floor_dn, clip_dn].
-    DNG BlackLevel/WhiteLevel are set to floor_dn/clip_dn to fit full sensor DR.
-    
-    Parameters:
-    - sensor_black_level: DN for zero open-domain linear signal (sensor black level).
-    - middle_gray_dn: Fixed DN for 0.18 open-domain linear.
-    - min_stop/max_stop: Stops relative to 0.18 where sensor clips/floors.
-    - white_level/black_level: If provided, override auto-computed clip/floor.
-    - bit_depth: The target bit depth for the output DNG.
+    fixed_middle_gray controls the file mapping for integer bit depths:
+    - True: middle gray pinned at 18% of file range, upper bound grows.
+    - False: upper bound pinned at file_max, middle gray shifts darker.
+    - None (default): integer→False, float32→True.
+
+    Sensor DR [min_stop, max_stop] maps to [floor_dn, clip_dn] in sensor DN space.
+    DNG BlackLevel/WhiteLevel are set to the file-mapped values.
     """
-    # Default middle_gray_dn: 18% of (max_dn - sensor_black_level)
-    baseline_exposure = 0.0
-    if middle_gray_dn is None:
-        max_dn = get_max_dn(bit_depth)
-        # Resolve three-state: None=auto, True=force fixed, False=force adaptive
-        use_fixed = fixed_middle_gray if fixed_middle_gray is not None else (bit_depth == 32)
-        if use_fixed:
-            middle_gray_dn = sensor_black_level + 0.18 * (max_dn - sensor_black_level)
-            baseline_exposure = 0.0
-        else:
-            # Adaptive: derive from max_stop so full range fits in integer bit depth
-            middle_gray_dn = sensor_black_level + (max_dn - sensor_black_level) / (2.0 ** max_stop)
-            # DNG BaselineExposure: exposure shift from fixed middle gray to adaptive
-            fixed_mg = sensor_black_level + 0.18 * (max_dn - sensor_black_level)
-            baseline_exposure = float(np.log2(fixed_mg / middle_gray_dn))
+    # ------------------------------------------------------------------
+    # 1. Sensor model (bit-depth independent)
+    # ------------------------------------------------------------------
+    # Base gain: DN per unit linear signal at native ISO
+    # Reference: 32-bit float with fixed middle gray
+    base_gain = get_max_dn(32) - sensor_black_level
+    gain_linear_to_dn = base_gain * (iso / native_iso)
 
-    # Internal derivation (invisible to user)
-    gain_linear_to_dn = (middle_gray_dn - sensor_black_level) / 0.18
     clip_linear = 0.18 * (2.0 ** max_stop)
+    floor_linear = 0.18 * (2.0 ** min_stop)
 
-    # Baseline well that reproduces current implicit behavior (dn_per_electron ≈ 1.0)
-    well_default = (middle_gray_dn - sensor_black_level) * (2.0 ** max_stop)
+    # Sensor range in DN (absolute, independent of bit depth)
+    clip_dn = sensor_black_level + clip_linear * gain_linear_to_dn
+    floor_dn = sensor_black_level + floor_linear * gain_linear_to_dn
 
-    # Scale well inversely with noise_level: lower well = more shot noise
+    # Middle gray DN in sensor space
+    sensor_mg_dn = sensor_black_level + 0.18 * gain_linear_to_dn
+
+    # Full well and electron calculations
+    well_default = gain_linear_to_dn * clip_linear
     well_scale = 100.0 ** (0.5 - noise_level)
     full_well_electrons = well_default * well_scale
 
@@ -312,35 +304,44 @@ def quantize_to_sensor(mosaic,
     # 4. Quantize to DN
     dn = signal_e * dn_per_electron + sensor_black_level
 
-    # Where clip and floor land in DN
-    floor_linear = 0.18 * (2.0 ** min_stop)
-    clip_dn = sensor_black_level + clip_linear * electrons_per_unit * dn_per_electron
-    floor_dn = sensor_black_level + floor_linear * electrons_per_unit * dn_per_electron
+    # ------------------------------------------------------------------
+    # 2. File format mapping (bit-depth dependent)
+    # ------------------------------------------------------------------
+    baseline_exposure = 0.0
 
-    # DNG BlackLevel/WhiteLevel: use provided or auto-compute to fit full sensor DR
-    dng_black = black_level if black_level is not None else floor_dn
-    dng_white = white_level if white_level is not None else clip_dn
-
-    dn_for_file = np.clip(dn, dng_black, dng_white)
-
-    if bit_depth != 32:
-        dn_for_file = np.rint(dn_for_file)
-
+    if bit_depth == 32:
+        dng_black = black_level if black_level is not None else floor_dn
+        dng_white = white_level if white_level is not None else clip_dn
+        dn_for_file = np.clip(dn, dng_black, dng_white)
+    else:
         file_max = (1 << bit_depth) - 1
-        dn_for_file = np.clip(dn_for_file, dng_black, file_max)
-        if dng_white > file_max:
-            print(
-                f"  WARNING: WhiteLevel ({dng_white:.0f}) exceeds {bit_depth}-bit "
-                f"file range ({file_max}). Integer bit depths do not support values "
-                f"above 1.0. Use 32-bit float to preserve the full range."
-            )
+        target_mg = sensor_black_level + 0.18 * (file_max - sensor_black_level)
 
-    print(f"  max_stop: {max_stop:+.1f}  -> clip_linear = {clip_linear:.4f} -> {clip_dn:.1f} DN")
-    print(f"  min_stop: {min_stop:+.1f}  -> floor_linear = {floor_linear:.6f} -> {floor_dn:.1f} DN")
+        # Resolve three-state: None=auto, True=force fixed, False=force adaptive
+        use_fixed = fixed_middle_gray if fixed_middle_gray is not None else False
+
+        if use_fixed:
+            scale = target_mg / sensor_mg_dn
+            baseline_exposure = 0.0
+        else:
+            scale = file_max / clip_dn
+            actual_mg = sensor_mg_dn * scale
+            baseline_exposure = float(np.log2(target_mg / actual_mg))
+
+        dn_scaled = dn * scale
+
+        dng_black = black_level if black_level is not None else floor_dn * scale
+        dng_white = white_level if white_level is not None else clip_dn * scale
+
+        dn_for_file = np.clip(np.rint(dn_scaled), dng_black, file_max)
+
+    print(f"  ISO: {iso:.0f}, Sensor Gain: {gain_linear_to_dn:.0f} DN per linear unit")
+    print(f"  max_stop: {max_stop:+.1f}  -> clip_linear = {clip_linear:.4f} -> {clip_dn:.0f} DN (sensor)")
+    print(f"  min_stop: {min_stop:+.1f}  -> floor_linear = {floor_linear:.6f} -> {floor_dn:.0f} DN (sensor)")
     print(f"  Noise Level: {noise_level:.2f}")
     print(f"  Derived Full Well Electrons: {full_well_electrons:.1f}")
     print(f"  Derived Gain: {dn_per_electron:.2f} DN per electron")
-    print(f"  0.18 middle gray -> {middle_gray_dn:.1f} DN")
+    print(f"  0.18 middle gray -> {sensor_mg_dn:.1f} DN (sensor)")
     print(f"  DNG BlackLevel: {dng_black:.1f}, WhiteLevel: {dng_white:.1f}")
     print(f"  Sensor DR (stops): {max_stop - min_stop:.2f}")
     if baseline_exposure != 0.0:
@@ -510,8 +511,9 @@ def main():
             'min_stop': DEFAULTS["min_stop"],
             'max_stop': DEFAULTS["max_stop"],
             'fixed_middle_gray': DEFAULTS["fixed_middle_gray"],
+            'native_iso': DEFAULTS["native_iso"],
+            'iso': DEFAULTS["iso"],
             'sensor_black_level': DEFAULTS["sensor_black_level"],
-            'middle_gray_dn': DEFAULTS["middle_gray_dn"],
             'white_level': DEFAULTS["white_level"],
             'black_level': DEFAULTS["black_level"],
             'bit_depth': DEFAULTS["bit_depth"],
@@ -522,7 +524,7 @@ def main():
     else:
         parser = argparse.ArgumentParser(
             description="Convert linear Rec.2020 RGB EXR to synthetic Bayer-raw DNG. "
-                        "Gain is set by max_stop only.")
+                        "Gain is set by ISO. Dynamic range is set by max_stop.")
         parser.add_argument("input", help="Input EXR")
         parser.add_argument("output_dng", nargs='?', default=None,
                             help="Output DNG path (default: same name as input with .dng)")
@@ -539,8 +541,8 @@ def main():
         parser.add_argument("--min-stop", type=float, default=DEFAULTS["min_stop"],
                             help="Stops below 0.18 where signal hits noise floor. Default: -10.0")
         parser.add_argument("--max-stop", type=float, default=DEFAULTS["max_stop"],
-                            help="Stops above 0.18 where sensor clips. Sets the gain. "
-                                 "Default: 4.0 (0.18 -> ~1264 DN, clip at 2.88)")
+                            help="Stops above 0.18 where sensor clips. Sets the dynamic range. "
+                                 "Default: 4.0")
         parser.add_argument("--fixed-middle-gray", action=argparse.BooleanOptionalAction,
                             default=DEFAULTS["fixed_middle_gray"],
                             help="Pin middle gray at 18%% of file range. "
@@ -552,8 +554,12 @@ def main():
         
         parser.add_argument("--sensor-black-level", type=int, default=DEFAULTS["sensor_black_level"],
                             help="DN for zero open-domain linear signal (sensor black level). Default: 256")
-        parser.add_argument("--middle-gray-dn", type=int, default=DEFAULTS["middle_gray_dn"],
-                            help="Fixed DN for 0.18 middle gray. Default: auto (18%% of selected bit depth range above sensor_black_level)")
+        parser.add_argument("--native-iso", type=float, default=DEFAULTS["native_iso"],
+                            help="Camera native (base) ISO. Defines the sensor's intrinsic "
+                                 "gain. Default: 100")
+        parser.add_argument("--iso", type=float, default=DEFAULTS["iso"],
+                            help="Shooting ISO. Gain = base_gain * (iso / native_iso). "
+                                 "Higher ISO = more gain and more noise. Default: 100")
         
         parser.add_argument("--white-level", type=int, default=DEFAULTS["white_level"],
                             help="DNG WhiteLevel. Default: auto (sensor clip point at max_stop)")
@@ -624,8 +630,9 @@ def main():
         min_stop=args.min_stop,
         max_stop=args.max_stop,
         fixed_middle_gray=args.fixed_middle_gray,
+        native_iso=args.native_iso,
+        iso=args.iso,
         sensor_black_level=args.sensor_black_level,
-        middle_gray_dn=args.middle_gray_dn,
         black_level=args.black_level,
         white_level=args.white_level,
         read_noise=args.read_noise,

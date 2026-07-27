@@ -1,8 +1,5 @@
-#!/usr/bin/env python3
 """
-exr2dng.py
-Convert a linear Rec.2020 RGB EXR to a synthetic Bayer-raw DNG.
-Sensor gain is set by max_stop only. min_stop defines the noise floor.
+Convert a linear Rec.2020 RGB EXR to Bayer-raw DNG with a simulated virtual camera.
 """
 
 import argparse
@@ -13,9 +10,11 @@ import numpy as np
 from fractions import Fraction
 
 
-# Single source of truth for all default parameters
+# all default parameters
 DEFAULTS = {
     # Input filters: Rec.709 primaries expressed in Rec.2020 RGB space
+    # Rec.2020 primaries are spectral, 630 nm (red), 532 nm (green), and 467 nm (blue)
+    # Therefore, expressing Rec.709 RGB directly in Rec.2020 counts as a pseudo spectral reconstruction.
     "r_filter": [0.627404, 0.069097, 0.016391],
     "g_filter": [0.329283, 0.919540, 0.088013],
     "b_filter": [0.043313, 0.011362, 0.895595],
@@ -27,7 +26,7 @@ DEFAULTS = {
     "min_stop": -10.0,
     "max_stop": 4.0,
 
-    # Sensor black level (DN for zero scene-linear signal)
+    # Sensor black level (DN for zero open-domain linear signal)
     "sensor_black_level": 256,
 
     # Middle gray DN (fixed regardless of max_stop/min_stop)
@@ -50,9 +49,8 @@ DEFAULTS = {
 
 def compute_cm1(r_filter, g_filter, b_filter):
     """
-    Compute ColorMatrix1 (XYZ to Camera Native) using the algorithmic algorithm.
+    Compute ColorMatrix1 (XYZ to Camera Native)
 
-    Algorithm:
     1. Rec.2020 primary chromaticities (x, y) with Y=1:
        R = (0.708, 0.292), G = (0.170, 0.797), B = (0.131, 0.046)
     2. D65 white point: (0.3127, 0.3290)
@@ -66,6 +64,7 @@ def compute_cm1(r_filter, g_filter, b_filter):
     7. CM1 = M_cam_from_XYZ in DNG rational format (row-major, 18 rationals)
     """
     # Rec.2020 primary chromaticities (x, y) with Y=1
+    # Rec.2020 primaries are spectral, 630 nm (red), 532 nm (green), and 467 nm (blue)
     r_xy = np.array([0.708, 0.292])
     g_xy = np.array([0.170, 0.797])
     b_xy = np.array([0.131, 0.046])
@@ -237,14 +236,14 @@ def quantize_to_sensor(mosaic,
     """
     Linear sensor model with fixed middle gray DN.
     
-    Middle gray (0.18 scene-linear) maps to middle_gray_dn (fixed).
+    Middle gray (0.18 open-domain linear) maps to middle_gray_dn (fixed).
     Gain is set so: 0.18 * gain = middle_gray_dn - sensor_black_level
     Sensor DR [min_stop, max_stop] maps to [floor_dn, clip_dn].
     DNG BlackLevel/WhiteLevel are set to floor_dn/clip_dn to fit full sensor DR.
     
     Parameters:
-    - sensor_black_level: DN for zero scene-linear signal (default 256)
-    - middle_gray_dn: Fixed DN for 0.18 scene-linear (default: 18% of 14-bit range)
+    - sensor_black_level: DN for zero open-domain linear signal (default 256)
+    - middle_gray_dn: Fixed DN for 0.18 open-domain linear (default: 18% of 14-bit range)
     - min_stop/max_stop: Stops relative to 0.18 where sensor clips/floors
     - white_level/black_level: If provided, override auto-computed clip/floor
     - output_format: "uint16", "uint32", or "float32"
@@ -253,11 +252,11 @@ def quantize_to_sensor(mosaic,
     if middle_gray_dn is None:
         middle_gray_dn = sensor_black_level + 0.18 * (16383 - sensor_black_level)
 
-    # Gain: DN per scene-linear unit, fixed by middle gray constraint
+    # Gain: DN per open-domain linear unit, fixed by middle gray constraint
     # 0.18 * gain = middle_gray_dn - sensor_black_level
     gain = (middle_gray_dn - sensor_black_level) / 0.18
 
-    # Scene-linear clip and floor points
+    # open-domain linear clip and floor points
     clip = 0.18 * (2.0 ** max_stop)
     floor = 0.18 * (2.0 ** min_stop)
 
@@ -271,7 +270,7 @@ def quantize_to_sensor(mosaic,
 
     print(f"  max_stop: {max_stop:+.1f}  -> clip = {clip:.4f} -> {clip_dn:.1f} DN")
     print(f"  min_stop: {min_stop:+.1f}  -> floor = {floor:.6f} -> {floor_dn:.1f} DN")
-    print(f"  Gain: {gain:.2f} DN per scene-linear unit")
+    print(f"  Gain: {gain:.2f} DN per open-domain linear unit")
     print(f"  0.18 middle gray -> {middle_gray_dn:.1f} DN (fixed)")
     print(f"  DNG BlackLevel: {dng_black:.1f}, WhiteLevel: {dng_white:.1f}")
     print(f"  Sensor DR (stops): {max_stop - min_stop:.2f}")
@@ -365,7 +364,7 @@ def write_dng(mosaic, path,
         # Ensure mosaic is float32 (tifffile will auto-set SampleFormat=3)
         if mosaic.dtype != np.float32:
             mosaic = mosaic.astype(np.float32)
-        # For float32 DNG, WhiteLevel/BlackLevel are written as LONG (integers) per DNG spec / darktable
+        # For float32 DNG, WhiteLevel/BlackLevel are written as LONG (integers)
         bl_tag_type = 4  # SLONG
         bl_count = 1
         bl_val = int(black_level)
@@ -494,7 +493,7 @@ def main():
                                  "Default: 4.0 (0.18 -> ~1264 DN, clip at 2.88)")
         
         parser.add_argument("--sensor-black-level", type=int, default=DEFAULTS["sensor_black_level"],
-                            help="DN for zero scene-linear signal (sensor black level). Default: 256")
+                            help="DN for zero open-domain linear signal (sensor black level). Default: 256")
         parser.add_argument("--middle-gray-dn", type=int, default=DEFAULTS["middle_gray_dn"],
                             help="Fixed DN for 0.18 middle gray. Default: auto (18%% of 14-bit range above sensor_black_level)")
         
@@ -508,7 +507,7 @@ def main():
                             choices=["auto", "uint16", "uint32", "float32"],
                             help="Output data format: auto (default, selects float32 for 32-bit, uint16 otherwise), "
                                  "uint16, uint32, or float32. "
-                                 "float32 writes 32-bit IEEE float DNG compatible with darktable HDR.")
+                                 "float32 writes 32-bit IEEE float DNGp")
         parser.add_argument("--read-noise", type=float, default=DEFAULTS["read_noise"],
                             help="Read noise std-dev in DN (0 to disable)")
         parser.add_argument("--no-shot-noise", action="store_true", default=DEFAULTS["no_shot_noise"])

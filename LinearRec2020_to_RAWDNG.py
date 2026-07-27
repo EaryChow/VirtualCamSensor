@@ -26,6 +26,8 @@ DEFAULTS = {
     "min_stop": -10.0,
     "max_stop": 4.0,
 
+    "sensor_sensitivity_weighting": [1.0, 1.0, 1.0],
+
     # Sensor black level (DN for zero open-domain linear signal)
     "sensor_black_level": 256,
 
@@ -172,10 +174,11 @@ def read_exr(path, expect_rgb=True):
 # ------------------------------------------------------------------
 # 2. Bayer Filtering
 # ------------------------------------------------------------------
-def filter_rgb_to_scalar(rgb, r_filter, g_filter, b_filter):
-    r_plane = np.dot(rgb, r_filter)
-    g_plane = np.dot(rgb, g_filter)
-    b_plane = np.dot(rgb, b_filter)
+def filter_rgb_to_scalar(rgb, r_filter, g_filter, b_filter, sensor_weight):
+    # Effective response = filter(λ) * sensor(λ), integrated over all λ
+    r_plane = np.dot(rgb, r_filter * sensor_weight)
+    g_plane = np.dot(rgb, g_filter * sensor_weight)
+    b_plane = np.dot(rgb, b_filter * sensor_weight)
     return r_plane, g_plane, b_plane
 
 
@@ -540,7 +543,8 @@ def main():
         print(f"  Shape: {rgb.shape}, range: [{rgb.min():.4f}, {rgb.max():.4f}]")
         
         print("Applying Bayer filters...")
-        r, g1, b_scalar = filter_rgb_to_scalar(rgb, r_filter, g_filter, b_filter)
+        sensor_weight = np.array(DEFAULTS["sensor_sensitivity_weighting"], dtype=np.float32)
+        r, g1, b_scalar = filter_rgb_to_scalar(rgb, r_filter, g_filter, b_filter, sensor_weight)
         g2 = g1.copy()
 
     print(f"R  shape: {r.shape}, range: [{r.min():.4f}, {r.max():.4f}]")

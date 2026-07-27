@@ -26,21 +26,26 @@ DEFAULTS = {
     "min_stop": -10.0,
     "max_stop": 4.0,
 
+    # None = auto: integer bit depths use adaptive middle gray (upper bound pinned
+    # at file_max, middle gray shifts darker to preserve higher-range content),
+    # float32 uses fixed middle gray at 18%. True/False override per-bit-depth default.
+    "fixed_middle_gray": None,
+
     "sensor_sensitivity_weighting": [1.0, 1.0, 1.0],
 
     # Sensor black level (DN for zero open-domain linear signal)
     "sensor_black_level": 256,
 
-    # Middle gray DN (fixed regardless of max_stop/min_stop)
-    # Default: 18% of 14-bit range above sensor_black_level
+    # Middle gray DN
+    # Default: auto-compute based on fixed_middle_gray and bit_depth
     "middle_gray_dn": None,  # None = auto-compute as sensor_black_level + 0.18 * (16383 - 256)
 
     # DNG output levels (will be set to fit full sensor DR [min_stop, max_stop])
     # These are computed automatically if not specified
     "white_level": None,
     "black_level": None,
+    # available: 10, 12, 14, 16, 32
     "bit_depth": 32,
-    "output_format": "auto",  # "auto", "uint16", "uint32", or "float32"
 
     # Noise model
     "read_noise": 1.5,
@@ -231,6 +236,7 @@ def build_bayer(r_plane, g1_plane, g2_plane, b_plane, pattern='RGGB'):
 def quantize_to_sensor(mosaic,
                        min_stop=DEFAULTS["min_stop"],
                        max_stop=DEFAULTS["max_stop"],
+                       fixed_middle_gray=DEFAULTS["fixed_middle_gray"],
                        sensor_black_level=DEFAULTS["sensor_black_level"],
                        middle_gray_dn=DEFAULTS["middle_gray_dn"],
                        white_level=DEFAULTS["white_level"],
@@ -238,25 +244,43 @@ def quantize_to_sensor(mosaic,
                        read_noise=DEFAULTS["read_noise"],
                        shot_noise=DEFAULTS["shot_noise"],
                        noise_level=DEFAULTS["noise_level"],
-                       output_format=DEFAULTS["output_format"]):
+                       bit_depth=DEFAULTS["bit_depth"]):
     """
-    Linear sensor model with fixed middle gray DN.
-    
-    Middle gray (0.18 open-domain linear) maps to middle_gray_dn (fixed).
+    Linear sensor model.
+
+    When fixed_middle_gray=True, middle gray (0.18 open-domain linear) maps to a
+    fixed DN (18% of file range). Upper bound grows with max_stop.
+    When fixed_middle_gray=False, upper bound is pinned at file_max and middle gray
+    shifts darker, allowing higher-range content to fit in integer bit depths.
+    When fixed_middle_gray=None (default), integer bit depths behave as False and
+    float32 behaves as True.
+
     Gain is set so: 0.18 * gain = middle_gray_dn - sensor_black_level
     Sensor DR [min_stop, max_stop] maps to [floor_dn, clip_dn].
     DNG BlackLevel/WhiteLevel are set to floor_dn/clip_dn to fit full sensor DR.
     
     Parameters:
-    - sensor_black_level: DN for zero open-domain linear signal (default 256)
-    - middle_gray_dn: Fixed DN for 0.18 open-domain linear (default: 18% of 14-bit range)
-    - min_stop/max_stop: Stops relative to 0.18 where sensor clips/floors
-    - white_level/black_level: If provided, override auto-computed clip/floor
-    - output_format: "uint16", "uint32", or "float32"
+    - sensor_black_level: DN for zero open-domain linear signal (sensor black level).
+    - middle_gray_dn: Fixed DN for 0.18 open-domain linear.
+    - min_stop/max_stop: Stops relative to 0.18 where sensor clips/floors.
+    - white_level/black_level: If provided, override auto-computed clip/floor.
+    - bit_depth: The target bit depth for the output DNG.
     """
-    # Default middle_gray_dn: 18% of 14-bit usable range (16383 - 256 = 16127)
+    # Default middle_gray_dn: 18% of (max_dn - sensor_black_level)
+    baseline_exposure = 0.0
     if middle_gray_dn is None:
-        middle_gray_dn = sensor_black_level + 0.18 * (16383 - sensor_black_level)
+        max_dn = get_max_dn(bit_depth)
+        # Resolve three-state: None=auto, True=force fixed, False=force adaptive
+        use_fixed = fixed_middle_gray if fixed_middle_gray is not None else (bit_depth == 32)
+        if use_fixed:
+            middle_gray_dn = sensor_black_level + 0.18 * (max_dn - sensor_black_level)
+            baseline_exposure = 0.0
+        else:
+            # Adaptive: derive from max_stop so full range fits in integer bit depth
+            middle_gray_dn = sensor_black_level + (max_dn - sensor_black_level) / (2.0 ** max_stop)
+            # DNG BaselineExposure: exposure shift from fixed middle gray to adaptive
+            fixed_mg = sensor_black_level + 0.18 * (max_dn - sensor_black_level)
+            baseline_exposure = float(np.log2(fixed_mg / middle_gray_dn))
 
     # Internal derivation (invisible to user)
     gain_linear_to_dn = (middle_gray_dn - sensor_black_level) / 0.18
@@ -285,7 +309,7 @@ def quantize_to_sensor(mosaic,
         read_noise_e = read_noise / dn_per_electron
         signal_e = signal_e + np.random.normal(0, read_noise_e, signal_e.shape)
 
-    # 4. Quantize and clip
+    # 4. Quantize to DN
     dn = signal_e * dn_per_electron + sensor_black_level
 
     # Where clip and floor land in DN
@@ -297,14 +321,30 @@ def quantize_to_sensor(mosaic,
     dng_black = black_level if black_level is not None else floor_dn
     dng_white = white_level if white_level is not None else clip_dn
 
+    dn_for_file = np.clip(dn, dng_black, dng_white)
+
+    if bit_depth != 32:
+        dn_for_file = np.rint(dn_for_file)
+
+        file_max = (1 << bit_depth) - 1
+        dn_for_file = np.clip(dn_for_file, dng_black, file_max)
+        if dng_white > file_max:
+            print(
+                f"  WARNING: WhiteLevel ({dng_white:.0f}) exceeds {bit_depth}-bit "
+                f"file range ({file_max}). Integer bit depths do not support values "
+                f"above 1.0. Use 32-bit float to preserve the full range."
+            )
+
     print(f"  max_stop: {max_stop:+.1f}  -> clip_linear = {clip_linear:.4f} -> {clip_dn:.1f} DN")
     print(f"  min_stop: {min_stop:+.1f}  -> floor_linear = {floor_linear:.6f} -> {floor_dn:.1f} DN")
     print(f"  Noise Level: {noise_level:.2f}")
     print(f"  Derived Full Well Electrons: {full_well_electrons:.1f}")
     print(f"  Derived Gain: {dn_per_electron:.2f} DN per electron")
-    print(f"  0.18 middle gray -> {middle_gray_dn:.1f} DN (fixed)")
+    print(f"  0.18 middle gray -> {middle_gray_dn:.1f} DN")
     print(f"  DNG BlackLevel: {dng_black:.1f}, WhiteLevel: {dng_white:.1f}")
     print(f"  Sensor DR (stops): {max_stop - min_stop:.2f}")
+    if baseline_exposure != 0.0:
+        print(f"  BaselineExposure: {baseline_exposure:+.2f} stops")
 
     # Warn if user-provided levels don't cover full sensor DR
     if black_level is not None and floor_dn < dng_black:
@@ -312,18 +352,7 @@ def quantize_to_sensor(mosaic,
     if white_level is not None and clip_dn > dng_white:
         print(f"  WARNING: Clip ({clip_dn:.1f}) above DNG WhiteLevel ({dng_white}), highlights will clip")
 
-    # Clip to DNG range
-    dn = np.clip(dn, dng_black, dng_white)
-    
-    # Convert to output format
-    if output_format == "float32":
-        # For float32 DNG, return as float32 (DN values as floats)
-        # BlackLevel/WhiteLevel will also be float
-        return dn.astype(np.float32), float(dng_black), float(dng_white)
-    elif output_format == "uint32":
-        return np.rint(dn).astype(np.uint32), int(np.floor(dng_black)), int(np.ceil(dng_white))
-    else:  # uint16
-        return np.rint(dn).astype(np.uint16), int(np.floor(dng_black)), int(np.ceil(dng_white))
+    return dn_for_file, dng_black, dng_white, baseline_exposure
 
 
 # ------------------------------------------------------------------
@@ -333,11 +362,11 @@ def write_dng(mosaic, path,
               black_level=DEFAULTS["black_level"],
               white_level=DEFAULTS["white_level"],
               bit_depth=DEFAULTS["bit_depth"],
-              output_format=DEFAULTS["output_format"],
               pattern=DEFAULTS["pattern"],
                r_filter=None,
                g_filter=None,
-               b_filter=None):
+               b_filter=None,
+               baseline_exposure=0.0):
     import tifffile
 
     h, w = mosaic.shape
@@ -377,8 +406,8 @@ def write_dng(mosaic, path,
     ab = (1, 1, 1, 1, 1, 1)
     ds = (1, 1, 1, 1)
 
-    # Determine bit depth and sample format from output_format
-    if output_format == "float32":
+    # Determine bit depth and sample format from bit_depth
+    if bit_depth == 32:
         bits_per_sample = 32
         # Ensure mosaic is float32 (tifffile will auto-set SampleFormat=3)
         if mosaic.dtype != np.float32:
@@ -390,26 +419,18 @@ def write_dng(mosaic, path,
         wl_tag_type = 4  # SLONG (LONG in libtiff)
         wl_count = 1
         wl_val = int(round(white_level))
-    elif output_format == "uint32":
-        bits_per_sample = 32
-        if mosaic.dtype != np.uint32:
-            mosaic = mosaic.astype(np.uint32)
-        bl_tag_type = 4  # SLONG
-        bl_count = 1
-        bl_val = int(black_level)
-        wl_tag_type = 4  # SLONG
-        wl_count = 1
-        wl_val = int(white_level)
-    else:  # uint16
-        bits_per_sample = 16
+    else:
+        bits_per_sample = bit_depth   # 10, 12, 14, or 16 — NOT always 16
         if mosaic.dtype != np.uint16:
             mosaic = mosaic.astype(np.uint16)
-        bl_tag_type = 3  # SHORT
-        bl_count = 1
+
         bl_val = int(black_level)
-        wl_tag_type = 3  # SHORT
+        wl_val = int(round(white_level))
+        # Use LONG (type 4) if values exceed unsigned SHORT (type 3) range [0, 65535]
+        bl_tag_type = 3 if 0 <= bl_val <= 65535 else 4
+        wl_tag_type = 3 if 0 <= wl_val <= 65535 else 4
+        bl_count = 1
         wl_count = 1
-        wl_val = int(white_level)
 
     extratags = [
         (262, 3, 1, 32803, False),        # PhotometricInterpretation = CFA
@@ -428,6 +449,12 @@ def write_dng(mosaic, path,
         (50727, 5, 3, ab, False),                     # AnalogBalance
     ]
 
+    if baseline_exposure != 0.0:
+        be = Fraction(baseline_exposure).limit_denominator(10000)
+        extratags.append(
+            (50779, 10, 1, (be.numerator, be.denominator), False)  # BaselineExposure
+        )
+
     tifffile.imwrite(
         path,
         mosaic,
@@ -437,7 +464,7 @@ def write_dng(mosaic, path,
         bitspersample=bits_per_sample,
         extratags=extratags,
     )
-    print(f"Wrote DNG: {path}  ({w}x{h}, {pattern}, {output_format})")
+    print(f"Wrote DNG: {path}  ({w}x{h}, {pattern})")
     print(f"  BlackLevel={black_level}, WhiteLevel={white_level}")
     print(f"  AsShotNeutral=[{asn_r/10000:.4f}, 1.0, {asn_b/10000:.4f}]")
 
@@ -445,6 +472,9 @@ def write_dng(mosaic, path,
 # ------------------------------------------------------------------
 # 6. Helpers
 # ------------------------------------------------------------------
+def get_max_dn(bit_depth):
+    return 65535 if bit_depth == 32 else (1 << bit_depth) - 1
+
 def parse_filter(s):
     return np.array([float(x.strip()) for x in s.split(',')], dtype=np.float32)
 
@@ -479,12 +509,12 @@ def main():
             'pattern': DEFAULTS["pattern"],
             'min_stop': DEFAULTS["min_stop"],
             'max_stop': DEFAULTS["max_stop"],
+            'fixed_middle_gray': DEFAULTS["fixed_middle_gray"],
             'sensor_black_level': DEFAULTS["sensor_black_level"],
             'middle_gray_dn': DEFAULTS["middle_gray_dn"],
             'white_level': DEFAULTS["white_level"],
             'black_level': DEFAULTS["black_level"],
             'bit_depth': DEFAULTS["bit_depth"],
-            'output_format': DEFAULTS["output_format"],
             'read_noise': DEFAULTS["read_noise"],
             'no_shot_noise': DEFAULTS["no_shot_noise"],
             'noise_level': DEFAULTS["noise_level"],
@@ -509,25 +539,34 @@ def main():
         parser.add_argument("--min-stop", type=float, default=DEFAULTS["min_stop"],
                             help="Stops below 0.18 where signal hits noise floor. Default: -10.0")
         parser.add_argument("--max-stop", type=float, default=DEFAULTS["max_stop"],
-                            help="Stops above 0.18 where sensor saturates. Sets the gain. "
+                            help="Stops above 0.18 where sensor clips. Sets the gain. "
                                  "Default: 4.0 (0.18 -> ~1264 DN, clip at 2.88)")
+        parser.add_argument("--fixed-middle-gray", action=argparse.BooleanOptionalAction,
+                            default=DEFAULTS["fixed_middle_gray"],
+                            help="Pin middle gray at 18%% of file range. "
+                                 "Default: None (auto). Integer bit depths use adaptive "
+                                 "middle gray (upper bound pinned at file_max, middle gray "
+                                 "shifts darker to preserve range). Float32 uses fixed "
+                                 "middle gray. Use --fixed-middle-gray to force on, "
+                                 "--no-fixed-middle-gray to force off.")
         
         parser.add_argument("--sensor-black-level", type=int, default=DEFAULTS["sensor_black_level"],
                             help="DN for zero open-domain linear signal (sensor black level). Default: 256")
         parser.add_argument("--middle-gray-dn", type=int, default=DEFAULTS["middle_gray_dn"],
-                            help="Fixed DN for 0.18 middle gray. Default: auto (18%% of 14-bit range above sensor_black_level)")
+                            help="Fixed DN for 0.18 middle gray. Default: auto (18%% of selected bit depth range above sensor_black_level)")
         
         parser.add_argument("--white-level", type=int, default=DEFAULTS["white_level"],
                             help="DNG WhiteLevel. Default: auto (sensor clip point at max_stop)")
         parser.add_argument("--black-level", type=int, default=DEFAULTS["black_level"],
                             help="DNG BlackLevel. Default: auto (sensor floor point at min_stop)")
         parser.add_argument("--bit-depth", type=int, default=DEFAULTS["bit_depth"],
-                            choices=[8, 10, 12, 14, 16, 32])
-        parser.add_argument("--output-format", default=DEFAULTS["output_format"],
-                            choices=["auto", "uint16", "uint32", "float32"],
-                            help="Output data format: auto (default, selects float32 for 32-bit, uint16 otherwise), "
-                                 "uint16, uint32, or float32. "
-                                 "float32 writes 32-bit IEEE float DNGp")
+                            choices=[10, 12, 14, 16, 32],
+                            help=(
+                                "ADC bit depth. 10/12/14/16 = unsigned integer; 32 = IEEE 754 float. "
+                                "A high max-stop may push the sensor's WhiteLevel beyond the integer "
+                                "file range; the file data will clip, but WhiteLevel preserves the "
+                                "sensor's full capacity for correct decoding. See --max-stop."
+                            ))
         parser.add_argument("--read-noise", type=float, default=DEFAULTS["read_noise"],
                             help="Read noise std-dev in DN (0 to disable)")
         parser.add_argument("--no-shot-noise", action="store_true", default=DEFAULTS["no_shot_noise"])
@@ -574,21 +613,17 @@ def main():
 
     mosaic = build_bayer(r, g1, g2, b, args.pattern)
 
-    # Auto-select output format based on bit depth
-    if args.output_format == "auto":
-        if args.bit_depth >= 32:
-            args.output_format = "float32"
-        else:
-            args.output_format = "uint16"
+
 
     # ------------------------------------------------------------------
     # Sensor model
     # ------------------------------------------------------------------
     print("\nApplying sensor model...")
-    raw, black_level, white_level = quantize_to_sensor(
+    raw, black_level, white_level, baseline_exposure = quantize_to_sensor(
         mosaic,
         min_stop=args.min_stop,
         max_stop=args.max_stop,
+        fixed_middle_gray=args.fixed_middle_gray,
         sensor_black_level=args.sensor_black_level,
         middle_gray_dn=args.middle_gray_dn,
         black_level=args.black_level,
@@ -596,7 +631,7 @@ def main():
         read_noise=args.read_noise,
         shot_noise=not args.no_shot_noise,
         noise_level=args.noise_level,
-        output_format=args.output_format,
+        bit_depth=args.bit_depth,
     )
 
     # ------------------------------------------------------------------
@@ -608,11 +643,11 @@ def main():
         black_level=black_level,
         white_level=white_level,
         bit_depth=args.bit_depth,
-        output_format=args.output_format,
         pattern=args.pattern,
         r_filter=r_filter,
         g_filter=g_filter,
         b_filter=b_filter,
+        baseline_exposure=baseline_exposure,
     )
 
 

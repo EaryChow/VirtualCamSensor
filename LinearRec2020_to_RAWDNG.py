@@ -46,6 +46,8 @@ DEFAULTS = {
     "read_noise": 1.5,
     "shot_noise": True,
     "no_shot_noise": False,
+    # from 0.0 to 1.0
+    "noise_level": 0.5,
 }
 
 
@@ -235,6 +237,7 @@ def quantize_to_sensor(mosaic,
                        black_level=DEFAULTS["black_level"],
                        read_noise=DEFAULTS["read_noise"],
                        shot_noise=DEFAULTS["shot_noise"],
+                       noise_level=DEFAULTS["noise_level"],
                        output_format=DEFAULTS["output_format"]):
     """
     Linear sensor model with fixed middle gray DN.
@@ -255,25 +258,50 @@ def quantize_to_sensor(mosaic,
     if middle_gray_dn is None:
         middle_gray_dn = sensor_black_level + 0.18 * (16383 - sensor_black_level)
 
-    # Gain: DN per open-domain linear unit, fixed by middle gray constraint
-    # 0.18 * gain = middle_gray_dn - sensor_black_level
-    gain = (middle_gray_dn - sensor_black_level) / 0.18
+    # Internal derivation (invisible to user)
+    gain_linear_to_dn = (middle_gray_dn - sensor_black_level) / 0.18
+    clip_linear = 0.18 * (2.0 ** max_stop)
 
-    # open-domain linear clip and floor points
-    clip = 0.18 * (2.0 ** max_stop)
-    floor = 0.18 * (2.0 ** min_stop)
+    # Baseline well that reproduces current implicit behavior (dn_per_electron ≈ 1.0)
+    well_default = (middle_gray_dn - sensor_black_level) * (2.0 ** max_stop)
+
+    # Scale well inversely with noise_level: lower well = more shot noise
+    well_scale = 100.0 ** (0.5 - noise_level)
+    full_well_electrons = well_default * well_scale
+
+    electrons_per_unit = full_well_electrons / clip_linear
+    dn_per_electron = gain_linear_to_dn / electrons_per_unit
+
+    # 1. Linear signal → electrons
+    signal_e = mosaic * electrons_per_unit
+
+    # 2. Shot noise in electron domain
+    if shot_noise:
+        shot_noise_e = np.random.normal(0, np.sqrt(np.maximum(signal_e, 0.0)))
+        signal_e = signal_e + shot_noise_e
+
+    # 3. Read noise (user param is in DN; convert to electrons internally)
+    if read_noise > 0:
+        read_noise_e = read_noise / dn_per_electron
+        signal_e = signal_e + np.random.normal(0, read_noise_e, signal_e.shape)
+
+    # 4. Quantize and clip
+    dn = signal_e * dn_per_electron + sensor_black_level
 
     # Where clip and floor land in DN
-    clip_dn = sensor_black_level + clip * gain
-    floor_dn = sensor_black_level + floor * gain
+    floor_linear = 0.18 * (2.0 ** min_stop)
+    clip_dn = sensor_black_level + clip_linear * electrons_per_unit * dn_per_electron
+    floor_dn = sensor_black_level + floor_linear * electrons_per_unit * dn_per_electron
 
     # DNG BlackLevel/WhiteLevel: use provided or auto-compute to fit full sensor DR
     dng_black = black_level if black_level is not None else floor_dn
     dng_white = white_level if white_level is not None else clip_dn
 
-    print(f"  max_stop: {max_stop:+.1f}  -> clip = {clip:.4f} -> {clip_dn:.1f} DN")
-    print(f"  min_stop: {min_stop:+.1f}  -> floor = {floor:.6f} -> {floor_dn:.1f} DN")
-    print(f"  Gain: {gain:.2f} DN per open-domain linear unit")
+    print(f"  max_stop: {max_stop:+.1f}  -> clip_linear = {clip_linear:.4f} -> {clip_dn:.1f} DN")
+    print(f"  min_stop: {min_stop:+.1f}  -> floor_linear = {floor_linear:.6f} -> {floor_dn:.1f} DN")
+    print(f"  Noise Level: {noise_level:.2f}")
+    print(f"  Derived Full Well Electrons: {full_well_electrons:.1f}")
+    print(f"  Derived Gain: {dn_per_electron:.2f} DN per electron")
     print(f"  0.18 middle gray -> {middle_gray_dn:.1f} DN (fixed)")
     print(f"  DNG BlackLevel: {dng_black:.1f}, WhiteLevel: {dng_white:.1f}")
     print(f"  Sensor DR (stops): {max_stop - min_stop:.2f}")
@@ -283,18 +311,6 @@ def quantize_to_sensor(mosaic,
         print(f"  WARNING: Floor ({floor_dn:.1f}) below DNG BlackLevel ({dng_black}), shadows will clip")
     if white_level is not None and clip_dn > dng_white:
         print(f"  WARNING: Clip ({clip_dn:.1f}) above DNG WhiteLevel ({dng_white}), highlights will clip")
-
-    dn = mosaic * gain + sensor_black_level
-
-    # Photon shot noise
-    if shot_noise:
-        electrons = np.maximum(dn - sensor_black_level, 0.0)
-        noise = np.random.normal(0, np.sqrt(electrons))
-        dn = dn + noise
-
-    # Read noise
-    if read_noise > 0:
-        dn = dn + np.random.normal(0, read_noise, dn.shape)
 
     # Clip to DNG range
     dn = np.clip(dn, dng_black, dng_white)
@@ -471,6 +487,7 @@ def main():
             'output_format': DEFAULTS["output_format"],
             'read_noise': DEFAULTS["read_noise"],
             'no_shot_noise': DEFAULTS["no_shot_noise"],
+            'noise_level': DEFAULTS["noise_level"],
         })()
     else:
         parser = argparse.ArgumentParser(
@@ -514,6 +531,8 @@ def main():
         parser.add_argument("--read-noise", type=float, default=DEFAULTS["read_noise"],
                             help="Read noise std-dev in DN (0 to disable)")
         parser.add_argument("--no-shot-noise", action="store_true", default=DEFAULTS["no_shot_noise"])
+        parser.add_argument("--noise-level", type=float, default=DEFAULTS["noise_level"],
+                            help="Overall noise level (0.0-1.0, 0.5 is standard)")
         args = parser.parse_args()
 
         if args.output_dng is None:
@@ -576,6 +595,7 @@ def main():
         white_level=args.white_level,
         read_noise=args.read_noise,
         shot_noise=not args.no_shot_noise,
+        noise_level=args.noise_level,
         output_format=args.output_format,
     )
 

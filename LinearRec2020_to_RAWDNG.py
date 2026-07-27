@@ -24,7 +24,7 @@ DEFAULTS = {
 
     # Sensor model (stops relative to 0.18 middle gray)
     "min_stop": -10.0,
-    "max_stop": 4.0,
+    "max_stop": 8.0,
 
     # None = auto: integer bit depths use adaptive middle gray (upper bound pinned
     # at file_max, middle gray shifts darker to preserve higher-range content),
@@ -46,7 +46,14 @@ DEFAULTS = {
     "white_level": None,
     "black_level": None,
     # available: 10, 12, 14, 16, 32
-    "bit_depth": 32,
+    "bit_depth": 16,
+
+    # Log2 encoding for integer bit depths. Only takes effect when bit_depth is
+    # integer AND fixed_middle_gray is off (adaptive range). Encode the linear
+    # signal with a log2 curve to reduce quantization artifacts in lower ranges.
+    # IMPORTANT: requires the downstream RAW editor to support DNG LinearizationTable 
+    # for correct decoding.
+    "log_encode_int": False,
 
     # Noise model
     "read_noise": 1.5,
@@ -357,7 +364,33 @@ def quantize_to_sensor(mosaic,
 
 
 # ------------------------------------------------------------------
-# 4b. EXIF IFD patching (add ExposureBiasValue inside EXIF sub-IFD)
+# 4b. Log2 encoding for integer bit depths
+# ------------------------------------------------------------------
+def _log2_encode(mosaic, file_max):
+    """
+    Apply log2 encoding to linear data for integer bit depths.
+
+    Curve: y = log2(1 + x) where x = data / file_max, y in [0, 1].
+    Inverse: x = 2^y - 1.
+    This redistributes code values to reduce quantization artifacts in shadows.
+
+    Returns (encoded_data, lut) where lut is the LinearizationTable
+    (file_max + 1 entries, U16) that inverts the curve for the RAW editor.
+    """
+    x = np.clip(mosaic.astype(np.float64) / file_max, 0.0, 1.0)
+    y = np.log2(1.0 + x)
+    encoded = np.rint(y * file_max).astype(np.uint16 if file_max <= 65535 else np.uint32)
+
+    # LinearizationTable: lut[log_value] = linear_value
+    log_indices = np.arange(file_max + 1, dtype=np.float64)
+    linear_values = (np.power(2.0, log_indices / file_max) - 1.0) * file_max
+    lut = np.clip(np.rint(linear_values), 0, file_max).astype(np.uint16)
+
+    return encoded, lut
+
+
+# ------------------------------------------------------------------
+# 4c. EXIF IFD patching (add ExposureBiasValue inside EXIF sub-IFD)
 # ------------------------------------------------------------------
 def _patch_exif_ifd(path, numerator, denominator):
     import struct
@@ -417,7 +450,8 @@ def write_dng(mosaic, path,
                r_filter=None,
                g_filter=None,
                b_filter=None,
-               baseline_exposure=0.0):
+               baseline_exposure=0.0,
+               linearization_lut=None):
     import tifffile
 
     h, w = mosaic.shape
@@ -505,6 +539,11 @@ def write_dng(mosaic, path,
             (50730, 10, 1, (be.numerator, be.denominator), False)  # BaselineExposure
         )
 
+    if linearization_lut is not None:
+        extratags.append(
+            (50712, 3, len(linearization_lut), tuple(linearization_lut), False)  # LinearizationTable
+        )
+
     tifffile.imwrite(
         path,
         mosaic,
@@ -589,6 +628,7 @@ def main():
             'read_noise': DEFAULTS["read_noise"],
             'no_shot_noise': DEFAULTS["no_shot_noise"],
             'noise_level': DEFAULTS["noise_level"],
+            'log_encode_int': DEFAULTS["log_encode_int"],
         })()
     else:
         parser = argparse.ArgumentParser(
@@ -642,6 +682,12 @@ def main():
                                 "file range; the file data will clip, but WhiteLevel preserves the "
                                 "sensor's full capacity for correct decoding. See --max-stop."
                             ))
+        parser.add_argument("--log-encode-int", action=argparse.BooleanOptionalAction,
+                            default=DEFAULTS["log_encode_int"],
+                            help="Apply log2 encoding to integer bit depths. Reduces quantization "
+                                 "artifacts in shadows at the cost of requiring the downstream RAW "
+                                 "editor to support DNG LinearizationTable (tag 0xC618). Only active "
+                                 "for integer bit depths with adaptive range (fixed_middle_gray off).")
         parser.add_argument("--read-noise", type=float, default=DEFAULTS["read_noise"],
                             help="Read noise std-dev in DN (0 to disable)")
         parser.add_argument("--no-shot-noise", action="store_true", default=DEFAULTS["no_shot_noise"])
@@ -711,6 +757,19 @@ def main():
     )
 
     # ------------------------------------------------------------------
+    # Log encoding (integer bit depths only, adaptive range)
+    # ------------------------------------------------------------------
+    linearization_lut = None
+    if args.log_encode_int and args.bit_depth != 32:
+        use_fixed = args.fixed_middle_gray if args.fixed_middle_gray is not None else False
+        if not use_fixed:
+            file_max = (1 << args.bit_depth) - 1
+            raw, linearization_lut = _log2_encode(raw, file_max)
+            print(f"  Log2 encoding applied ({len(linearization_lut)} entry LUT)")
+        else:
+            print("  Log encoding skipped: fixed_middle_gray is on")
+
+    # ------------------------------------------------------------------
     # Write DNG
     # ------------------------------------------------------------------
     write_dng(
@@ -724,6 +783,7 @@ def main():
         g_filter=g_filter,
         b_filter=b_filter,
         baseline_exposure=baseline_exposure,
+        linearization_lut=linearization_lut,
     )
 
 

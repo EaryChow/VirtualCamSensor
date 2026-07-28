@@ -365,11 +365,11 @@ def encode_adaptive(sensor_dn, meta, bit_depth,
     sensor_mg_dn = meta['sensor_mg_dn']
 
     # Clip to sensor DR and normalize to [0, 1.0]
-    signal = np.clip(sensor_dn, sensor_black_level, clip_dn)
-    normalized = (signal - sensor_black_level) / (clip_dn - sensor_black_level)
+    signal = np.clip(sensor_dn, floor_dn, clip_dn)
+    normalized = (signal - floor_dn) / (clip_dn - floor_dn)
 
     # Middle gray in normalized space (independent of bit depth)
-    actual_mg_norm = (sensor_mg_dn - sensor_black_level) / (clip_dn - sensor_black_level)
+    actual_mg_norm = (sensor_mg_dn - floor_dn) / (clip_dn - floor_dn)
     baseline_exposure = float(np.log2(0.18 / actual_mg_norm))
 
     # Optional power curve in float [0, 1.0]

@@ -337,8 +337,8 @@ def quantize_to_sensor(mosaic,
 
         dn_scaled = dn * scale
 
-        dng_black = black_level if black_level is not None else floor_dn * scale
-        dng_white = white_level if white_level is not None else clip_dn * scale
+        dng_black = black_level if black_level is not None else int(round(floor_dn * scale))
+        dng_white = white_level if white_level is not None else int(round(clip_dn * scale))
 
         dn_for_file = np.clip(np.rint(dn_scaled), dng_black, file_max)
 
@@ -500,7 +500,7 @@ def write_dng(mosaic, path,
         # For float32 DNG, WhiteLevel/BlackLevel are written as LONG (integers)
         bl_tag_type = 4  # SLONG
         bl_count = 1
-        bl_val = int(black_level)
+        bl_val = int(round(black_level))
         wl_tag_type = 4  # SLONG (LONG in libtiff)
         wl_count = 1
         wl_val = int(round(white_level))
@@ -509,7 +509,7 @@ def write_dng(mosaic, path,
         if mosaic.dtype != np.uint16:
             mosaic = mosaic.astype(np.uint16)
 
-        bl_val = int(black_level)
+        bl_val = int(round(black_level))
         wl_val = int(round(white_level))
         # Use LONG (type 4) if values exceed unsigned SHORT (type 3) range [0, 65535]
         bl_tag_type = 3 if 0 <= bl_val <= 65535 else 4

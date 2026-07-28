@@ -429,56 +429,6 @@ def encode_adaptive(sensor_dn, meta, bit_depth,
 
 
 # ------------------------------------------------------------------
-# 4c. EXIF IFD patching (add ExposureBiasValue inside EXIF sub-IFD)
-# ------------------------------------------------------------------
-def _patch_exif_ifd(path, numerator, denominator):
-    import struct
-
-    with open(path, 'r+b') as f:
-        data = bytearray(f.read())
-
-    assert data[0:2] == b'II', "Only little-endian TIFF supported"
-    root_ifd_offset = struct.unpack_from('<I', data, 4)[0]
-    entry_count = struct.unpack_from('<H', data, root_ifd_offset)[0]
-    entries_start = root_ifd_offset + 2
-
-    new_entry_count = entry_count + 1
-    new_root_ifd_offset = len(data)
-
-    exif_ifd_offset = new_root_ifd_offset + 2 + new_entry_count * 12 + 4
-    exif_value_offset = exif_ifd_offset + 2 + 12 + 4
-
-    exif_ifd = bytearray()
-    exif_ifd += struct.pack('<H', 1)
-    exif_ifd += struct.pack('<HHII', 37380, 10, 1, exif_value_offset)
-    exif_ifd += struct.pack('<I', 0)
-    exif_ifd += struct.pack('<ii', numerator, denominator)
-
-    new_root_ifd = bytearray()
-    new_root_ifd += struct.pack('<H', new_entry_count)
-
-    insert_tag = 34665
-    inserted = False
-    for i in range(entry_count):
-        entry_off = entries_start + i * 12
-        tag = struct.unpack_from('<H', data, entry_off)[0]
-        if not inserted and tag > insert_tag:
-            new_root_ifd += struct.pack('<HHII', insert_tag, 4, 1, exif_ifd_offset)
-            inserted = True
-        new_root_ifd += data[entry_off:entry_off + 12]
-    if not inserted:
-        new_root_ifd += struct.pack('<HHII', insert_tag, 4, 1, exif_ifd_offset)
-
-    new_root_ifd += struct.pack('<I', 0)
-
-    data += new_root_ifd + exif_ifd
-    struct.pack_into('<I', data, 4, new_root_ifd_offset)
-
-    with open(path, 'wb') as f:
-        f.write(data)
-
-
-# ------------------------------------------------------------------
 # 5. Write DNG
 # ------------------------------------------------------------------
 def write_dng(mosaic, path,
@@ -586,25 +536,6 @@ def write_dng(mosaic, path,
         bitspersample=bits_per_sample,
         extratags=extratags,
     )
-
-    if baseline_exposure != 0.0:
-        import subprocess, shutil
-        exiftool = shutil.which("exiftool")
-        if exiftool is None:
-            for p in [r"D:\exiftool-13.59_64\exiftool.exe",
-                       r"D:\exiftool-13.59_64\exiftool(-k).exe"]:
-                if os.path.isfile(p):
-                    exiftool = p
-                    break
-        if exiftool:
-            subprocess.run(
-                [exiftool, "-overwrite_original",
-                 f"-ExposureCompensation={-baseline_exposure:.6f}",
-                 path],
-                input=b"\n", check=True, capture_output=True)
-            print(f"  Injected EXIF ExposureCompensation via exiftool: {baseline_exposure:.6f}")
-        else:
-            _patch_exif_ifd(path, be.numerator, be.denominator)
 
     print(f"Wrote DNG: {path}  ({w}x{h}, {pattern})")
     print(f"  BlackLevel={black_level}, WhiteLevel={white_level}")

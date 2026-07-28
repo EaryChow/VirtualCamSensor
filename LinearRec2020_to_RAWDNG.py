@@ -48,12 +48,14 @@ DEFAULTS = {
     # available: 10, 12, 14, 16, 32
     "bit_depth": 16,
 
-    # Log2 encoding for integer bit depths. Only takes effect when bit_depth is
+    # Power encoding for integer bit depths. Only takes effect when bit_depth is
     # integer AND fixed_middle_gray is off (adaptive range). Encode the linear
-    # signal with a log2 curve to reduce quantization artifacts in lower ranges.
+    # signal with a power curve (x^1/exponent) to reduce quantization artifacts
+    # in lower ranges.
     # IMPORTANT: requires the downstream RAW editor to support DNG LinearizationTable 
     # for correct decoding.
-    "log_encode_int": False,
+    "pow_encode_int": True,
+    "power_exponent": 2.6,
 
     # Noise model
     "read_noise": 1.5,
@@ -340,7 +342,11 @@ def quantize_to_sensor(mosaic,
         dng_black = black_level if black_level is not None else int(round(floor_dn * scale))
         dng_white = white_level if white_level is not None else int(round(clip_dn * scale))
 
-        dn_for_file = np.clip(np.rint(dn_scaled), dng_black, file_max)
+        # Adaptive range: return raw sensor DN, clipped to sensor DR
+        if not use_fixed:
+            dn_for_file = np.clip(dn, sensor_black_level, clip_dn)
+        else:
+            dn_for_file = np.clip(np.rint(dn_scaled), dng_black, file_max)
 
     print(f"  ISO: {iso:.0f}, Sensor Gain: {gain_linear_to_dn:.0f} DN per linear unit")
     print(f"  max_stop: {max_stop:+.1f}  -> clip_linear = {clip_linear:.4f} -> {clip_dn:.0f} DN (sensor)")
@@ -360,33 +366,63 @@ def quantize_to_sensor(mosaic,
     if white_level is not None and clip_dn > dng_white:
         print(f"  WARNING: Clip ({clip_dn:.1f}) above DNG WhiteLevel ({dng_white}), highlights will clip")
 
-    return dn_for_file, dng_black, dng_white, baseline_exposure
+    return dn_for_file, dng_black, dng_white, baseline_exposure, sensor_mg_dn
 
 
 # ------------------------------------------------------------------
-# 4b. Log2 encoding for integer bit depths
+# 4b. Power encoding for integer bit depths
 # ------------------------------------------------------------------
-def _log2_encode(mosaic, file_max):
+def _pow_encode(mosaic_dn, file_max, sensor_black_level, sensor_mg_dn, max_stop, min_stop, power_exponent):
     """
-    Apply log2 encoding to linear data for integer bit depths.
-
-    Curve: y = log2(1 + x) where x = data / file_max, y in [0, 1].
-    Inverse: x = 2^y - 1.
-    This redistributes code values to reduce quantization artifacts in shadows.
-
-    Returns (encoded_data, lut) where lut is the LinearizationTable
-    (file_max + 1 entries, U16) that inverts the curve for the RAW editor.
+    Encode continuous sensor DN to code values using a power curve (x^1/N).
     """
-    x = np.clip(mosaic.astype(np.float64) / file_max, 0.0, 1.0)
-    y = np.log2(1.0 + x)
-    encoded = np.rint(y * file_max).astype(np.uint16 if file_max <= 65535 else np.uint32)
+    mg = sensor_mg_dn - sensor_black_level
 
-    # LinearizationTable: lut[log_value] = linear_value
-    log_indices = np.arange(file_max + 1, dtype=np.float64)
-    linear_values = (np.power(2.0, log_indices / file_max) - 1.0) * file_max
-    lut = np.clip(np.rint(linear_values), 0, file_max).astype(np.uint16)
+    # Scene-linear relative to middle gray, clipped to sensor DR
+    x = np.clip(mosaic_dn, sensor_black_level, sensor_black_level + mg * 2.0 ** max_stop)
+    x = (x - sensor_black_level) / mg
 
-    return encoded, lut
+    # x is in [2^min_stop, 2^max_stop]; apply power curve
+    inv_exp = 1.0 / power_exponent
+    y = np.power(x, inv_exp)
+
+    # Normalize to [0, file_max]
+    x_min = 2.0 ** min_stop
+    x_max = 2.0 ** max_stop
+    y_norm = (y - np.power(x_min, inv_exp)) / (np.power(x_max, inv_exp) - np.power(x_min, inv_exp))
+
+    # TPDF dither before quantization
+    dither = (np.random.uniform(-0.5, 0.5, x.shape) +
+              np.random.uniform(-0.5, 0.5, x.shape))
+
+    encoded = np.rint(np.clip(y_norm * file_max + dither * 0.5, 0, file_max))
+    return encoded.astype(np.uint16 if file_max <= 65535 else np.uint32)
+
+
+def _build_pow_lut(file_max, max_stop, min_stop, sensor_black_level, sensor_mg_dn, power_exponent):
+    """
+    Build DNG LinearizationTable (tag 50712, 16-bit unsigned).
+    Maps power-encoded code -> normalized linear value in [0, file_max].
+    Inverse of the x^(1/N) curve: linear = code^N.
+    """
+    codes = np.arange(file_max + 1, dtype=np.float64)
+    y_norm = codes / file_max
+
+    # Inverse power curve
+    inv_exp = 1.0 / power_exponent
+    x_min = 2.0 ** min_stop
+    x_max = 2.0 ** max_stop
+    y_min = np.power(x_min, inv_exp)
+    y_max = np.power(x_max, inv_exp)
+    x = np.power(y_norm * (y_max - y_min) + y_min, power_exponent)
+
+    # Anchor LUT zero to the encoder's actual minimum clip point
+    linear_value = (x - x_min) / (x_max - x_min) * file_max
+    lut = np.clip(np.rint(linear_value), 0, file_max).astype(np.uint16)
+
+    # Monotonicity guard
+    lut = np.maximum.accumulate(lut)
+    return lut
 
 
 # ------------------------------------------------------------------
@@ -492,45 +528,39 @@ def write_dng(mosaic, path,
     ds = (1, 1, 1, 1)
 
     # Determine bit depth and sample format from bit_depth
+    bl_val = int(round(black_level))
+
     if bit_depth == 32:
         bits_per_sample = 32
-        # Ensure mosaic is float32 (tifffile will auto-set SampleFormat=3)
         if mosaic.dtype != np.float32:
             mosaic = mosaic.astype(np.float32)
-        # For float32 DNG, WhiteLevel/BlackLevel are written as LONG (integers)
         bl_tag_type = 4  # SLONG
         bl_count = 1
-        bl_val = int(round(black_level))
-        wl_tag_type = 4  # SLONG (LONG in libtiff)
-        wl_count = 1
+        wl_tag_type = 4  # SLONG
         wl_val = int(round(white_level))
     else:
-        bits_per_sample = bit_depth   # 10, 12, 14, or 16 — NOT always 16
+        bits_per_sample = bit_depth
         if mosaic.dtype != np.uint16:
             mosaic = mosaic.astype(np.uint16)
-
-        bl_val = int(round(black_level))
         wl_val = int(round(white_level))
-        # Use LONG (type 4) if values exceed unsigned SHORT (type 3) range [0, 65535]
         bl_tag_type = 3 if 0 <= bl_val <= 65535 else 4
         wl_tag_type = 3 if 0 <= wl_val <= 65535 else 4
         bl_count = 1
-        wl_count = 1
 
     extratags = [
-        (33421, 3, 2, (2, 2), False),     # CFARepeatPatternDim
-        (33422, 1, 4, tuple(cfa), False), # CFAPattern
-        (50706, 1, 4, (1, 4, 0, 0), False),          # DNGVersion
-        (50707, 1, 4, (1, 1, 0, 0), False),          # DNGBackwardVersion
-        (50708, 2, 1, b"Synthetic", False),         # UniqueCameraModel
-        (50714, bl_tag_type, bl_count, bl_val, False),       # BlackLevel
-        (50717, wl_tag_type, wl_count, wl_val, False),       # WhiteLevel
-        (50718, 5, 2, ds, False),                     # DefaultScale
-        (50721, 10, 9, cm1, False),                   # ColorMatrix1
-        (50723, 10, 9, cc1, False),                   # CameraCalibration1
-        (50728, 5, 3, asn, False),                    # AsShotNeutral
-        (50778, 3, 1, 21, False),                     # CalibrationIlluminant1 (D65)
-        (50727, 5, 3, ab, False),                     # AnalogBalance
+        (33421, 3, 2, (2, 2), False),      # CFARepeatPatternDim
+        (33422, 1, 4, tuple(cfa), False),   # CFAPattern
+        (50706, 1, 4, (1, 4, 0, 0), False), # DNGVersion
+        (50707, 1, 4, (1, 1, 0, 0), False), # DNGBackwardVersion
+        (50708, 2, 1, b"Synthetic", False),  # UniqueCameraModel
+        (50714, bl_tag_type, bl_count, bl_val, False),  # BlackLevel (scalar)
+        (50717, wl_tag_type, 1, wl_val, False),    # WhiteLevel
+        (50718, 5, 2, ds, False),           # DefaultScale
+        (50721, 10, 9, cm1, False),         # ColorMatrix1
+        (50723, 10, 9, cc1, False),         # CameraCalibration1
+        (50728, 5, 3, asn, False),          # AsShotNeutral
+        (50778, 3, 1, 21, False),           # CalibrationIlluminant1 (D65)
+        (50727, 5, 3, ab, False),           # AnalogBalance
     ]
 
     if baseline_exposure != 0.0:
@@ -628,7 +658,8 @@ def main():
             'read_noise': DEFAULTS["read_noise"],
             'no_shot_noise': DEFAULTS["no_shot_noise"],
             'noise_level': DEFAULTS["noise_level"],
-            'log_encode_int': DEFAULTS["log_encode_int"],
+            'pow_encode_int': DEFAULTS["pow_encode_int"],
+            'power_exponent': DEFAULTS["power_exponent"],
         })()
     else:
         parser = argparse.ArgumentParser(
@@ -682,12 +713,15 @@ def main():
                                 "file range; the file data will clip, but WhiteLevel preserves the "
                                 "sensor's full capacity for correct decoding. See --max-stop."
                             ))
-        parser.add_argument("--log-encode-int", action=argparse.BooleanOptionalAction,
-                            default=DEFAULTS["log_encode_int"],
-                            help="Apply log2 encoding to integer bit depths. Reduces quantization "
+        parser.add_argument("--pow-encode-int", action=argparse.BooleanOptionalAction,
+                            default=DEFAULTS["pow_encode_int"],
+                            help="Apply power encoding to integer bit depths. Reduces quantization "
                                  "artifacts in shadows at the cost of requiring the downstream RAW "
                                  "editor to support DNG LinearizationTable (tag 0xC618). Only active "
                                  "for integer bit depths with adaptive range (fixed_middle_gray off).")
+        parser.add_argument("--power-exponent", type=float, default=DEFAULTS["power_exponent"],
+                            help="Exponent for power encoding curve (1/N). Higher values compress "
+                                 "shadows more. Default: 2.6")
         parser.add_argument("--read-noise", type=float, default=DEFAULTS["read_noise"],
                             help="Read noise std-dev in DN (0 to disable)")
         parser.add_argument("--no-shot-noise", action="store_true", default=DEFAULTS["no_shot_noise"])
@@ -740,7 +774,7 @@ def main():
     # Sensor model
     # ------------------------------------------------------------------
     print("\nApplying sensor model...")
-    raw, black_level, white_level, baseline_exposure = quantize_to_sensor(
+    raw_float, black_level, white_level, baseline_exposure, sensor_mg_dn = quantize_to_sensor(
         mosaic,
         min_stop=args.min_stop,
         max_stop=args.max_stop,
@@ -757,17 +791,45 @@ def main():
     )
 
     # ------------------------------------------------------------------
-    # Log encoding (integer bit depths only, adaptive range)
+    # Encoding path
     # ------------------------------------------------------------------
+    file_max = (1 << args.bit_depth) - 1
+    use_fixed = args.fixed_middle_gray if args.fixed_middle_gray is not None else False
     linearization_lut = None
-    if args.log_encode_int and args.bit_depth != 32:
-        use_fixed = args.fixed_middle_gray if args.fixed_middle_gray is not None else False
-        if not use_fixed:
-            file_max = (1 << args.bit_depth) - 1
-            raw, linearization_lut = _log2_encode(raw, file_max)
-            print(f"  Log2 encoding applied ({len(linearization_lut)} entry LUT)")
-        else:
-            print("  Log encoding skipped: fixed_middle_gray is on")
+
+    if args.bit_depth == 32:
+        raw = raw_float.astype(np.float32)
+
+    elif not use_fixed:
+        # Integer adaptive range: power encoding is required
+        if not args.pow_encode_int:
+            print("WARNING: Integer adaptive range requires power encoding. Forcing --pow-encode-int.")
+            args.pow_encode_int = True
+
+        raw = _pow_encode(
+            raw_float, file_max, args.sensor_black_level, sensor_mg_dn,
+            args.max_stop, args.min_stop, args.power_exponent
+        )
+
+        linearization_lut = _build_pow_lut(
+            file_max, args.max_stop, args.min_stop,
+            args.sensor_black_level, sensor_mg_dn, args.power_exponent
+        )
+
+        # DNG levels from LUT endpoints
+        black_level = int(round(linearization_lut[0]))
+        white_level = int(round(linearization_lut[-1]))
+        # baseline_exposure is kept from quantize_to_sensor
+
+        cps = file_max / (args.max_stop - args.min_stop)
+        print(f"  Power encoding (exponent 1/{args.power_exponent}): codes_per_stop={cps:.1f}")
+        if cps < 10:
+            print(f"  WARNING: Only {cps:.1f} codes per stop. Deep shadows will posterize.")
+        print(f"  LinearizationTable: {len(linearization_lut)} entries, 16-bit")
+
+    else:
+        # Integer fixed middle gray: linear quantization
+        raw = np.clip(np.rint(raw_float), black_level, file_max).astype(np.uint16)
 
     # ------------------------------------------------------------------
     # Write DNG

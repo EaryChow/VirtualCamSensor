@@ -28,7 +28,8 @@ USER_PARAMETERS = {
 
     # None = auto: integer bit depths use adaptive middle gray (upper bound pinned
     # at file_max, middle gray shifts darker to preserve higher-range content),
-    # float32 uses fixed middle gray at 18%. True/False override per-bit-depth default.
+    # float32 uses fixed middle gray at 0.18. True/False override per-bit-depth default.
+    # But note actual behavior depends on downstream software, for example, ACR normalizes anyway.
     "fixed_middle_gray": None,
 
     # Camera ISO. Higher ISO = more gain = more noise.
@@ -334,6 +335,8 @@ def encode_fixed(sensor_dn, meta, bit_depth,
         scaled = sensor_dn * scale
         dng_black = black_level if black_level is not None else int(round(floor_dn * scale))
         dng_white = white_level if white_level is not None else int(round(clip_dn * scale))
+        if bit_depth != 32:
+            dng_white = min(dng_white, file_max)
         encoded = np.clip(np.rint(scaled), dng_black, file_max).astype(np.uint16)
         baseline_exposure = 0.0
 
@@ -404,6 +407,9 @@ def encode_adaptive(sensor_dn, meta, bit_depth,
         encoded = np.rint(dithered * file_max).astype(np.uint16 if file_max <= 65535 else np.uint32)
         dng_black = 0 if black_level is None else int(black_level)
         dng_white = file_max if white_level is None else int(white_level)
+        if bit_depth != 32:
+            file_max = (1 << bit_depth) - 1
+            dng_white = min(dng_white, file_max)
 
         # LinearizationTable (only if power curve applied)
         if apply_power:
@@ -516,6 +522,13 @@ def write_dng(mosaic, path,
         (50727, 5, 3, ab, False),           # AnalogBalance
     ]
 
+    extratags.extend([
+        (50734, 5, 2, (0, 1, 0, 1), False),   # DefaultCropOrigin  = (0, 0)
+        (50739, 5, 2, (w, 1, h, 1), False),   # DefaultCropSize    = (width, height)
+        (271, 2, 1, b"Generic", False),        # Make
+        (272, 2, 1, b"Virtual", False),        # Model
+    ])
+
     if baseline_exposure != 0.0:
         be = Fraction(baseline_exposure).limit_denominator(10000)
         extratags.append(
@@ -535,6 +548,8 @@ def write_dng(mosaic, path,
         compression=None,
         bitspersample=bits_per_sample,
         extratags=extratags,
+        subfiletype=0,
+        description=None,
     )
 
     print(f"Wrote DNG: {path}  ({w}x{h}, {pattern})")
@@ -644,8 +659,7 @@ def main():
                             help=(
                                 "ADC bit depth. 10/12/14/16 = unsigned integer; 32 = IEEE 754 float. "
                                 "A high max-stop may push the sensor's WhiteLevel beyond the integer "
-                                "file range; the file data will clip, but WhiteLevel preserves the "
-                                "sensor's full capacity for correct decoding. See --max-stop."
+                                "file range; the file data will clip."
                             ))
         parser.add_argument("--pow-encode-int", action=argparse.BooleanOptionalAction,
                             default=USER_PARAMETERS["pow_encode_int"],

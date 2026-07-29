@@ -10,8 +10,8 @@ import numpy as np
 from fractions import Fraction
 
 
-# all default parameters
-DEFAULTS = {
+# all user parameters
+USER_PARAMETERS = {
     # Input filters: Rec.709 primaries expressed in Rec.2020 RGB space
     # Rec.2020 primaries are spectral, 630 nm (red), 532 nm (green), and 467 nm (blue)
     # Therefore, expressing Rec.709 RGB directly in Rec.2020 counts as a pseudo spectral reconstruction.
@@ -24,7 +24,7 @@ DEFAULTS = {
 
     # Sensor model (stops relative to 0.18 middle gray)
     "min_stop": -10.0,
-    "max_stop": 8.0,
+    "max_stop": 4.0,
 
     # None = auto: integer bit depths use adaptive middle gray (upper bound pinned
     # at file_max, middle gray shifts darker to preserve higher-range content),
@@ -243,14 +243,14 @@ def build_bayer(r_plane, g1_plane, g2_plane, b_plane, pattern='RGGB'):
 # 4. Physical sensor model (bit-depth agnostic)
 # ------------------------------------------------------------------
 def simulate_sensor(mosaic,
-                    min_stop=DEFAULTS["min_stop"],
-                    max_stop=DEFAULTS["max_stop"],
-                    native_iso=DEFAULTS["native_iso"],
-                    iso=DEFAULTS["iso"],
-                    sensor_black_level=DEFAULTS["sensor_black_level"],
-                    read_noise=DEFAULTS["read_noise"],
-                    shot_noise=DEFAULTS["shot_noise"],
-                    noise_level=DEFAULTS["noise_level"]):
+                    min_stop=USER_PARAMETERS["min_stop"],
+                    max_stop=USER_PARAMETERS["max_stop"],
+                    native_iso=USER_PARAMETERS["native_iso"],
+                    iso=USER_PARAMETERS["iso"],
+                    sensor_black_level=USER_PARAMETERS["sensor_black_level"],
+                    read_noise=USER_PARAMETERS["read_noise"],
+                    shot_noise=USER_PARAMETERS["shot_noise"],
+                    noise_level=USER_PARAMETERS["noise_level"]):
     """
     Pure physical sensor model. No file-format or bit-depth awareness.
     Returns float sensor DN and a metadata dict.
@@ -432,10 +432,10 @@ def encode_adaptive(sensor_dn, meta, bit_depth,
 # 5. Write DNG
 # ------------------------------------------------------------------
 def write_dng(mosaic, path,
-              black_level=DEFAULTS["black_level"],
-              white_level=DEFAULTS["white_level"],
-              bit_depth=DEFAULTS["bit_depth"],
-              pattern=DEFAULTS["pattern"],
+              black_level=USER_PARAMETERS["black_level"],
+              white_level=USER_PARAMETERS["white_level"],
+              bit_depth=USER_PARAMETERS["bit_depth"],
+              pattern=USER_PARAMETERS["pattern"],
                r_filter=None,
                g_filter=None,
                b_filter=None,
@@ -576,24 +576,24 @@ def main():
             'input': input_exr,
             'output_dng': output_dng,
             'planes': None,
-            'r_filter': ','.join(map(str, DEFAULTS["r_filter"])),
-            'g_filter': ','.join(map(str, DEFAULTS["g_filter"])),
-            'b_filter': ','.join(map(str, DEFAULTS["b_filter"])),
-            'pattern': DEFAULTS["pattern"],
-            'min_stop': DEFAULTS["min_stop"],
-            'max_stop': DEFAULTS["max_stop"],
-            'fixed_middle_gray': DEFAULTS["fixed_middle_gray"],
-            'native_iso': DEFAULTS["native_iso"],
-            'iso': DEFAULTS["iso"],
-            'sensor_black_level': DEFAULTS["sensor_black_level"],
-            'white_level': DEFAULTS["white_level"],
-            'black_level': DEFAULTS["black_level"],
-            'bit_depth': DEFAULTS["bit_depth"],
-            'read_noise': DEFAULTS["read_noise"],
-            'no_shot_noise': DEFAULTS["no_shot_noise"],
-            'noise_level': DEFAULTS["noise_level"],
-            'pow_encode_int': DEFAULTS["pow_encode_int"],
-            'power_exponent': DEFAULTS["power_exponent"],
+            'r_filter': ','.join(map(str, USER_PARAMETERS["r_filter"])),
+            'g_filter': ','.join(map(str, USER_PARAMETERS["g_filter"])),
+            'b_filter': ','.join(map(str, USER_PARAMETERS["b_filter"])),
+            'pattern': USER_PARAMETERS["pattern"],
+            'min_stop': USER_PARAMETERS["min_stop"],
+            'max_stop': USER_PARAMETERS["max_stop"],
+            'fixed_middle_gray': USER_PARAMETERS["fixed_middle_gray"],
+            'native_iso': USER_PARAMETERS["native_iso"],
+            'iso': USER_PARAMETERS["iso"],
+            'sensor_black_level': USER_PARAMETERS["sensor_black_level"],
+            'white_level': USER_PARAMETERS["white_level"],
+            'black_level': USER_PARAMETERS["black_level"],
+            'bit_depth': USER_PARAMETERS["bit_depth"],
+            'read_noise': USER_PARAMETERS["read_noise"],
+            'no_shot_noise': USER_PARAMETERS["no_shot_noise"],
+            'noise_level': USER_PARAMETERS["noise_level"],
+            'pow_encode_int': USER_PARAMETERS["pow_encode_int"],
+            'power_exponent': USER_PARAMETERS["power_exponent"],
         })()
     else:
         parser = argparse.ArgumentParser(
@@ -604,21 +604,21 @@ def main():
                             help="Output DNG path (default: same name as input with .dng)")
         parser.add_argument("--planes", nargs=4, metavar=("R","G1","G2","B"),
                             help="Use 4 pre-rendered scalar EXRs instead of RGB filtering")
-        parser.add_argument("--r-filter", default=','.join(map(str, DEFAULTS["r_filter"])))
-        parser.add_argument("--g-filter", default=','.join(map(str, DEFAULTS["g_filter"])))
-        parser.add_argument("--b-filter", default=','.join(map(str, DEFAULTS["b_filter"])))
-        parser.add_argument("--pattern", default=DEFAULTS["pattern"],
+        parser.add_argument("--r-filter", default=','.join(map(str, USER_PARAMETERS["r_filter"])))
+        parser.add_argument("--g-filter", default=','.join(map(str, USER_PARAMETERS["g_filter"])))
+        parser.add_argument("--b-filter", default=','.join(map(str, USER_PARAMETERS["b_filter"])))
+        parser.add_argument("--pattern", default=USER_PARAMETERS["pattern"],
                             choices=["RGGB", "BGGR", "GRBG", "GBRG"])
         
         # Central setting: min and max stops relative to 0.18
         # max_stop sets the gain. min_stop is informational (noise floor).
-        parser.add_argument("--min-stop", type=float, default=DEFAULTS["min_stop"],
+        parser.add_argument("--min-stop", type=float, default=USER_PARAMETERS["min_stop"],
                             help="Stops below 0.18 where signal hits noise floor. Default: -10.0")
-        parser.add_argument("--max-stop", type=float, default=DEFAULTS["max_stop"],
+        parser.add_argument("--max-stop", type=float, default=USER_PARAMETERS["max_stop"],
                             help="Stops above 0.18 where sensor clips. Sets the dynamic range. "
                                  "Default: 4.0")
         parser.add_argument("--fixed-middle-gray", action=argparse.BooleanOptionalAction,
-                            default=DEFAULTS["fixed_middle_gray"],
+                            default=USER_PARAMETERS["fixed_middle_gray"],
                             help="Pin middle gray at 18%% of file range. "
                                  "Default: None (auto). Integer bit depths use adaptive "
                                  "middle gray (upper bound pinned at file_max, middle gray "
@@ -626,20 +626,20 @@ def main():
                                  "middle gray. Use --fixed-middle-gray to force on, "
                                  "--no-fixed-middle-gray to force off.")
         
-        parser.add_argument("--sensor-black-level", type=int, default=DEFAULTS["sensor_black_level"],
+        parser.add_argument("--sensor-black-level", type=int, default=USER_PARAMETERS["sensor_black_level"],
                             help="DN for zero open-domain linear signal (sensor black level). Default: 256")
-        parser.add_argument("--native-iso", type=float, default=DEFAULTS["native_iso"],
+        parser.add_argument("--native-iso", type=float, default=USER_PARAMETERS["native_iso"],
                             help="Camera native (base) ISO. Defines the sensor's intrinsic "
                                  "gain. Default: 100")
-        parser.add_argument("--iso", type=float, default=DEFAULTS["iso"],
+        parser.add_argument("--iso", type=float, default=USER_PARAMETERS["iso"],
                             help="Shooting ISO. Gain = base_gain * (iso / native_iso). "
                                  "Higher ISO = more gain and more noise. Default: 100")
         
-        parser.add_argument("--white-level", type=int, default=DEFAULTS["white_level"],
+        parser.add_argument("--white-level", type=int, default=USER_PARAMETERS["white_level"],
                             help="DNG WhiteLevel. Default: auto (sensor clip point at max_stop)")
-        parser.add_argument("--black-level", type=int, default=DEFAULTS["black_level"],
+        parser.add_argument("--black-level", type=int, default=USER_PARAMETERS["black_level"],
                             help="DNG BlackLevel. Default: auto (sensor floor point at min_stop)")
-        parser.add_argument("--bit-depth", type=int, default=DEFAULTS["bit_depth"],
+        parser.add_argument("--bit-depth", type=int, default=USER_PARAMETERS["bit_depth"],
                             choices=[10, 12, 14, 16, 32],
                             help=(
                                 "ADC bit depth. 10/12/14/16 = unsigned integer; 32 = IEEE 754 float. "
@@ -648,18 +648,18 @@ def main():
                                 "sensor's full capacity for correct decoding. See --max-stop."
                             ))
         parser.add_argument("--pow-encode-int", action=argparse.BooleanOptionalAction,
-                            default=DEFAULTS["pow_encode_int"],
+                            default=USER_PARAMETERS["pow_encode_int"],
                             help="Apply power encoding to adaptive range. Reduces quantization "
                                  "artifacts in lower ranges at the cost of requiring the downstream RAW "
                                  "editor to support DNG LinearizationTable (tag 0xC618). Only active "
                                  "with adaptive range (fixed_middle_gray off).")
-        parser.add_argument("--power-exponent", type=float, default=DEFAULTS["power_exponent"],
+        parser.add_argument("--power-exponent", type=float, default=USER_PARAMETERS["power_exponent"],
                             help="Exponent for power encoding curve (1/N). Higher values compress "
                                  "lower ranges more. Default: 2.6")
-        parser.add_argument("--read-noise", type=float, default=DEFAULTS["read_noise"],
+        parser.add_argument("--read-noise", type=float, default=USER_PARAMETERS["read_noise"],
                             help="Read noise std-dev in DN (0 to disable)")
-        parser.add_argument("--no-shot-noise", action="store_true", default=DEFAULTS["no_shot_noise"])
-        parser.add_argument("--noise-level", type=float, default=DEFAULTS["noise_level"],
+        parser.add_argument("--no-shot-noise", action="store_true", default=USER_PARAMETERS["no_shot_noise"])
+        parser.add_argument("--noise-level", type=float, default=USER_PARAMETERS["noise_level"],
                             help="Overall noise level (0.0-1.0, 0.5 is standard)")
         args = parser.parse_args()
 
@@ -690,7 +690,7 @@ def main():
         print(f"  Shape: {rgb.shape}, range: [{rgb.min():.4f}, {rgb.max():.4f}]")
         
         print("Applying Bayer filters...")
-        sensor_weight = np.array(DEFAULTS["sensor_sensitivity_weighting"], dtype=np.float32)
+        sensor_weight = np.array(USER_PARAMETERS["sensor_sensitivity_weighting"], dtype=np.float32)
         r, g1, b_scalar = filter_rgb_to_scalar(rgb, r_filter, g_filter, b_filter, sensor_weight)
         g2 = g1.copy()
 

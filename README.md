@@ -1,6 +1,6 @@
 # VirtualCamSensor
 
-<img width="1532" height="857" alt="image" src="https://github.com/user-attachments/assets/055c57e4-dfbf-4d67-a438-ebf2331c85e8" />
+<img width="1523" height="853" alt="image" src="https://github.com/user-attachments/assets/9b21ac3a-bcc6-4b38-9660-480b26052246" />
 
 
 ## What is this?

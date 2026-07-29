@@ -1,5 +1,8 @@
 """
 Convert a linear Rec.2020 RGB EXR to Bayer-raw DNG with a simulated virtual camera.
+requirement: python 3.12+
+pip install "tifffile>=2026.7.14" "imagecodecs>=2026.6.26" numpy OpenEXR imageio
+Expects input EXR to be linear Rec.2020 RGB.
 """
 
 import argparse
@@ -183,8 +186,7 @@ def read_exr(path, expect_rgb=True):
         return img
     except Exception as e:
         raise RuntimeError(
-            "Cannot read EXR. Install OpenEXR:  pip install OpenEXR\n"
-            "Or:  pip install imageio imageio-freeimage"
+            "Cannot read EXR. Install OpenEXR:  pip install OpenEXR"
         ) from e
 
 

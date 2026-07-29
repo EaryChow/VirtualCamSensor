@@ -256,7 +256,7 @@ def simulate_sensor(mosaic,
     Pure physical sensor model. No file-format or bit-depth awareness.
     Returns float sensor DN and a metadata dict.
     """
-    base_gain = get_max_dn(32) - sensor_black_level
+    base_gain = SENSOR_REF_CODE_MAX - sensor_black_level
     gain_linear_to_dn = base_gain * (iso / native_iso)
 
     clip_linear = 0.18 * (2.0 ** max_stop)
@@ -493,9 +493,9 @@ def write_dng(mosaic, path,
         bits_per_sample = 32
         if mosaic.dtype != np.float32:
             mosaic = mosaic.astype(np.float32)
-        bl_tag_type = 4  # SLONG
+        bl_tag_type = 4  # LONG
         bl_count = 1
-        wl_tag_type = 4  # SLONG
+        wl_tag_type = 4  # LONG
         wl_val = int(round(white_level))
     else:
         bits_per_sample = bit_depth
@@ -560,8 +560,7 @@ def write_dng(mosaic, path,
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
-def get_max_dn(bit_depth):
-    return 65535 if bit_depth == 32 else (1 << bit_depth) - 1
+SENSOR_REF_CODE_MAX = 65535
 
 def parse_filter(s):
     return np.array([float(x.strip()) for x in s.split(',')], dtype=np.float32)

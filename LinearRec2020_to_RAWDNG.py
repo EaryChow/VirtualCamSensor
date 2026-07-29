@@ -188,7 +188,7 @@ def read_exr(path, expect_rgb=True):
 
 
 # ------------------------------------------------------------------
-# 2. Bayer Filtering
+# Bayer Filtering
 # ------------------------------------------------------------------
 def filter_rgb_to_scalar(rgb, r_filter, g_filter, b_filter, sensor_weight):
     # Effective response = filter(λ) * sensor(λ), integrated over all λ
@@ -199,7 +199,7 @@ def filter_rgb_to_scalar(rgb, r_filter, g_filter, b_filter, sensor_weight):
 
 
 # ------------------------------------------------------------------
-# 3. Interleave Bayer mosaic
+# Interleave Bayer mosaic
 # ------------------------------------------------------------------
 def build_bayer(r_plane, g1_plane, g2_plane, b_plane, pattern='RGGB'):
     h, w = r_plane.shape
@@ -240,7 +240,7 @@ def build_bayer(r_plane, g1_plane, g2_plane, b_plane, pattern='RGGB'):
 
 
 # ------------------------------------------------------------------
-# 4. Physical sensor model (bit-depth agnostic)
+# Physical sensor model
 # ------------------------------------------------------------------
 def simulate_sensor(mosaic,
                     min_stop=USER_PARAMETERS["min_stop"],
@@ -308,7 +308,7 @@ def simulate_sensor(mosaic,
 
 
 # ------------------------------------------------------------------
-# 4b. Fixed middle-gray encoding
+# Fixed middle-gray encoding
 # ------------------------------------------------------------------
 def encode_fixed(sensor_dn, meta, bit_depth,
                  black_level=None, white_level=None):
@@ -347,7 +347,7 @@ def encode_fixed(sensor_dn, meta, bit_depth,
 
 
 # ------------------------------------------------------------------
-# 4c. Adaptive-range encoding (optional power curve)
+# Adaptive-range encoding
 # ------------------------------------------------------------------
 def encode_adaptive(sensor_dn, meta, bit_depth,
                     black_level=None, white_level=None,
@@ -429,7 +429,7 @@ def encode_adaptive(sensor_dn, meta, bit_depth,
 
 
 # ------------------------------------------------------------------
-# 5. Write DNG
+# Write DNG
 # ------------------------------------------------------------------
 def write_dng(mosaic, path,
               black_level=USER_PARAMETERS["black_level"],
@@ -543,7 +543,7 @@ def write_dng(mosaic, path,
 
 
 # ------------------------------------------------------------------
-# 6. Helpers
+# Helpers
 # ------------------------------------------------------------------
 def get_max_dn(bit_depth):
     return 65535 if bit_depth == 32 else (1 << bit_depth) - 1
@@ -558,7 +558,7 @@ def find_first_exr(script_dir):
 
 
 # ------------------------------------------------------------------
-# 7. Main
+# Main
 # ------------------------------------------------------------------
 def main():
     if len(sys.argv) == 1:
@@ -566,7 +566,7 @@ def main():
         input_exr = find_first_exr(script_dir)
         if input_exr is None:
             print("No .exr file found in script directory.")
-            print("Usage: python exr2dng.py input.exr [output.dng] [options]")
+            print("Usage: python this_script.py input.exr [output.dng] [options]")
             sys.exit(1)
         output_dng = os.path.splitext(input_exr)[0] + ".dng"
         print(f"Auto-detected input:  {input_exr}")
@@ -705,7 +705,7 @@ def main():
 
 
     # ------------------------------------------------------------------
-    # 1. Physical model (bit-depth independent)
+    # Physical model
     # ------------------------------------------------------------------
     print("\nApplying sensor model...")
     sensor_dn, meta = simulate_sensor(
@@ -721,14 +721,14 @@ def main():
     )
 
     # ------------------------------------------------------------------
-    # 2. Resolve fixed/adaptive from tri-state parameter
+    # Resolve fixed/adaptive from tri-state parameter
     # ------------------------------------------------------------------
     use_fixed = args.fixed_middle_gray
     if use_fixed is None:
         use_fixed = (args.bit_depth == 32)
 
     # ------------------------------------------------------------------
-    # 3. Encoding (bit-depth dependent)
+    # Encoding (bit-depth dependent)
     # ------------------------------------------------------------------
     if use_fixed:
         raw, black_level, white_level, baseline_exposure, lut = encode_fixed(

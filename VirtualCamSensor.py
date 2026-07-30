@@ -525,8 +525,8 @@ def write_dng(mosaic, path,
     ]
 
     extratags.extend([
-        (50734, 5, 2, (0, 1, 0, 1), False),   # DefaultCropOrigin  = (0, 0)
-        (50739, 5, 2, (w, 1, h, 1), False),   # DefaultCropSize    = (width, height)
+        (50719, 4, 2, (0, 0), False),          # DefaultCropOrigin  = (0, 0)
+        (50720, 4, 2, (w, h), False),          # DefaultCropSize    = (width, height)
         (271, 2, 1, b"Generic", False),        # Make
         (272, 2, 1, b"Virtual", False),        # Model
     ])

@@ -14,6 +14,8 @@ It uses Linear Rec.2020 as input, abusing the fact that its primaries are spectr
 The pipeline goes:
 Incoming lights defined with Rec.2020 primaries wavelengths → Bayer Filters with tri-wavelength-defined transmission spectrums → Sensor Scalar Signal → Photon-to-Electron Conversion (with full-well capacity) → Add Noise (photon shot noise + read noise) → gain to DN → Black Level Offset → Quantization/Encoding (fixed or adaptive range, optional power curve) → DNG Bayer File
 
+This project was built with extensive LLM assistance, most of the implementation code was generated rather than hand-written. The architecture, color science pipeline, and sensor model are original work directed by the repo owner, with outputs empirically validated against real raw processing software behavior.
+
 ## Why is it needed?
 
 Developing and testing Bayer-state algorithms requires genuine raw sensor data. But certain failure modes are relatively difficult to reliably recreate in real-world photography.
